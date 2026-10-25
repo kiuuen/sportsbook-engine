@@ -291,7 +291,12 @@ if __name__ == "__main__":
             print("4. Return here and press ENTER when ready to evaluate captured traffic.")
             print("-------------------------------------------------------\n")
 
-            await asyncio.to_thread(input, "--> Press ENTER to stop capturing and evaluate candidate endpoints... <--\n")
+            await asyncio.to_thread(
+                input, "--> Press ENTER to stop capturing and evaluate candidate endpoints... <--\n"
+            )
+
+            print("[*] Draining pending in-flight network requests...")
+            await asyncio.sleep(2.0)
 
             events = interceptor.get_captured_events()
             await interceptor.stop()

@@ -21,7 +21,7 @@ class ChromeOrchestrator:
         self.port = port
         self.headless = headless
 
-        # Configuración de directorio persistente para el perfil
+        # Persistent profile directory configuration
         if base_profile_dir:
             self.profile_dir = pathlib.Path(base_profile_dir) / profile_name
         else:
@@ -51,12 +51,12 @@ class ChromeOrchestrator:
             if os.path.isfile(path):
                 return path
         raise FileNotFoundError(
-            "No se encontró el ejecutable de Google Chrome en las rutas estándar de Windows."
+            "Google Chrome executable was not found in standard Windows paths."
         )
 
     def start(self, timeout: float = 15.0) -> bool:
         if self.process and self.process.poll() is None:
-            return True  # Ya está en ejecución
+            return True  # Already running
 
         chrome_exe = self._find_chrome_executable()
 
@@ -73,7 +73,7 @@ class ChromeOrchestrator:
         if self.headless:
             cmd.append("--headless=new")
 
-        # Iniciar el proceso sin ventana emergente en Windows
+        # Start process without popup window on Windows
         creationflags = 0
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
             creationflags = subprocess.CREATE_NO_WINDOW
@@ -85,30 +85,35 @@ class ChromeOrchestrator:
             creationflags=creationflags,
         )
 
-        # Confirmación de disponibilidad de CDP
+        # Confirm CDP availability
         if not self._wait_for_cdp(timeout=timeout):
             self.stop()
             raise RuntimeError(
-                f"Chrome se inició, pero CDP no estuvo disponible en el puerto {self.port} tras {timeout}s."
+                f"Chrome started, but CDP was not available on port {self.port} after {timeout}s."
             )
 
         return True
 
     def _wait_for_cdp(self, timeout: float) -> bool:
-        url = f"http://127.0.0.1:{self.port}/json/version"
+        url = f"http://127.0.0.1:{self.port}/json/list"
         start_time = time.time()
 
         while time.time() - start_time < timeout:
             if self.process and self.process.poll() is not None:
-                # El proceso terminó de forma prematura
+                # Process terminated prematurely
                 return False
             try:
                 req = urllib.request.Request(url, method="GET")
                 with urllib.request.urlopen(req, timeout=1.0) as response:
                     if response.status == 200:
                         data = json.loads(response.read().decode("utf-8"))
-                        if "webSocketDebuggerUrl" in data:
-                            return True
+                        if isinstance(data, list):
+                            for target in data:
+                                if (
+                                    target.get("type") == "page"
+                                    and "webSocketDebuggerUrl" in target
+                                ):
+                                    return True
             except (urllib.error.URLError, TimeoutError, ConnectionResetError):
                 pass
             time.sleep(0.5)
@@ -130,22 +135,29 @@ class ChromeOrchestrator:
         return self.process is not None and self.process.poll() is None
 
     def get_cdp_url(self) -> str:
-        url = f"http://127.0.0.1:{self.port}/json/version"
+        url = f"http://127.0.0.1:{self.port}/json/list"
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=3.0) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
-                    return str(data["webSocketDebuggerUrl"])
+                    if isinstance(data, list):
+                        for target in data:
+                            if (
+                                target.get("type") == "page"
+                                and "webSocketDebuggerUrl" in target
+                            ):
+                                return str(target["webSocketDebuggerUrl"])
         except Exception as err:
             raise RuntimeError(
-                f"No se pudo obtener la URL del WebSocket CDP en puerto {self.port}: {err}"
+                f"Failed to obtain CDP WebSocket URL on port {self.port}: {err}"
             ) from err
-        raise RuntimeError(f"Respuesta no válida del endpoint CDP en puerto {self.port}.")
-
+        raise RuntimeError(
+            f"No valid page target found on CDP endpoint on port {self.port}."
+        )
 
 if __name__ == "__main__":
-    print("[*] Iniciando prueba de orquestación de Chrome...")
+    print("[*] Starting Chrome Orchestrator test...")
     orchestrator = ChromeOrchestrator(
         profile_name="target_test_profile", port=9222, headless=False
     )
@@ -153,19 +165,16 @@ if __name__ == "__main__":
     try:
         orchestrator.start(timeout=10.0)
         print(
-            f"[+] Instancia iniciada correctamente. CDP activo en puerto {orchestrator.port}."
+            f"[+] Instance started successfully. CDP active on port {orchestrator.port}."
         )
-        print(f"[+] Directorio de perfil: {orchestrator.profile_dir.resolve()}")
+        print(f"[+] Profile directory: {orchestrator.profile_dir.resolve()}")
 
-        # Verificar acceso al endpoint /json/version
-        req = urllib.request.urlopen(
-            f"http://127.0.0.1:{orchestrator.port}/json/version"
-        )
-        info = json.loads(req.read().decode("utf-8"))
-        print(f"[+] Versión de Browser CDP: {info.get('Browser')}")
+        # Verify page target WebSocket URL retrieval
+        ws_url = orchestrator.get_cdp_url()
+        print(f"[+] Page Target WebSocket URL: {ws_url}")
 
         time.sleep(3)
     finally:
-        print("[*] Cerrando instancia de Chrome...")
+        print("[*] Stopping Chrome instance...")
         orchestrator.stop()
-        print("[+] Proceso finalizado y verificado.")
+        print("[+] Process finished and verified.")

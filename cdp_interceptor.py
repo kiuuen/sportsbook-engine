@@ -37,8 +37,8 @@ class CDPNetworkInterceptor:
         self.cdp_ws_url: str = cdp_ws_url
         self.on_event_callback: Optional[Callable[[NetworkEvent], None]] = on_event_callback
         self.captured_events: List[NetworkEvent] = []
-        
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+
+        self._ws: Optional[Any] = None
         self._listen_task: Optional[asyncio.Task[None]] = None
         self._is_listening: bool = False
         self._msg_id: int = 0
@@ -53,13 +53,13 @@ class CDPNetworkInterceptor:
             self._ws = await websockets.connect(self.cdp_ws_url, max_size=None)
             self._is_listening = True
             self._listen_task = asyncio.create_task(self._listen_loop())
-            
-            # Habilitar el dominio de red en CDP
+
+            # Enable network domain in CDP
             await self._send_command("Network.enable")
-            logging.info("[CDP] Monitoreo de red activado exitosamente.")
+            logging.info("[CDP] Network monitoring enabled successfully.")
         except Exception as err:
             self._is_listening = False
-            raise RuntimeError(f"Error al conectar o iniciar CDP Interceptor: {err}") from err
+            raise RuntimeError(f"Failed to connect or start CDP Interceptor: {err}") from err
 
     async def stop(self) -> None:
         if not self._is_listening:
@@ -67,11 +67,14 @@ class CDPNetworkInterceptor:
 
         self._is_listening = False
         try:
-            if self._ws and self._ws.open:
-                await self._send_command("Network.disable")
+            if self._ws:
+                try:
+                    await self._send_command("Network.disable")
+                except Exception:
+                    pass
                 await self._ws.close()
         except Exception as err:
-            logging.warning(f"[CDP] Excepción durante el cierre de WebSocket: {err}")
+            logging.warning(f"[CDP] Exception during WebSocket closure: {err}")
         finally:
             if self._listen_task and not self._listen_task.done():
                 self._listen_task.cancel()
@@ -79,7 +82,7 @@ class CDPNetworkInterceptor:
                     await self._listen_task
                 except asyncio.CancelledError:
                     pass
-            logging.info("[CDP] Interceptor detenido.")
+            logging.info("[CDP] Interceptor stopped.")
 
     def get_captured_events(self) -> List[NetworkEvent]:
         return list(self.captured_events)
@@ -87,8 +90,8 @@ class CDPNetworkInterceptor:
     async def _send_command(
         self, method: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        if not self._ws or not self._ws.open:
-            raise RuntimeError("WebSocket no está conectado.")
+        if not self._ws:
+            raise RuntimeError("WebSocket is not connected.")
 
         self._msg_id += 1
         cmd_id = self._msg_id
@@ -114,7 +117,7 @@ class CDPNetworkInterceptor:
                 except json.JSONDecodeError:
                     continue
 
-                # Manejo de respuestas a comandos enviados
+                # Handle response to sent commands
                 if "id" in data and data["id"] in self._pending_commands:
                     cmd_id = data["id"]
                     future = self._pending_commands.pop(cmd_id)
@@ -126,14 +129,14 @@ class CDPNetworkInterceptor:
                         future.set_result(data.get("result", {}))
                     continue
 
-                # Manejo de eventos asíncronos de CDP
+                # Handle asynchronous CDP events
                 if "method" in data:
                     self._handle_cdp_event(data["method"], data.get("params", {}))
 
         except websockets.ConnectionClosed:
-            logging.info("[CDP] Conexión WebSocket cerrada.")
+            logging.info("[CDP] WebSocket connection closed.")
         except Exception as err:
-            logging.error(f"[CDP] Error en el bucle de escucha: {err}")
+            logging.error(f"[CDP] Error in listen loop: {err}")
 
     def _handle_cdp_event(self, method: str, params: Dict[str, Any]) -> None:
         request_id = params.get("requestId")
@@ -173,8 +176,8 @@ class CDPNetworkInterceptor:
     ) -> None:
         resource_type = req_data.get("resource_type", "")
         mime_type = req_data.get("mime_type", "").lower()
-        
-        # Filtrar payloads estructurados (JSON / XHR / Fetch) para optimizar memoria
+
+        # Filter structured payloads (JSON / XHR / Fetch) to optimize memory
         is_structured_data = (
             resource_type in ("XHR", "Fetch")
             or "json" in mime_type
@@ -193,7 +196,7 @@ class CDPNetworkInterceptor:
                 else:
                     body = raw_body
             except Exception as err:
-                logging.debug(f"[CDP] No se pudo obtener el cuerpo de {request_id}: {err}")
+                logging.debug(f"[CDP] Could not get response body for {request_id}: {err}")
 
         event = NetworkEvent(
             request_id=request_id,
@@ -213,12 +216,12 @@ class CDPNetworkInterceptor:
             try:
                 self.on_event_callback(event)
             except Exception as callback_err:
-                logging.error(f"[CDP] Error en el callback del evento: {callback_err}")
+                logging.error(f"[CDP] Error in event callback: {callback_err}")
 
 
 if __name__ == "__main__":
     async def main() -> None:
-        print("[*] Iniciando Chrome Orchestrator para la prueba...")
+        print("[*] Starting Chrome Orchestrator for test...")
         orchestrator = ChromeOrchestrator(
             profile_name="interceptor_test_profile", port=9222, headless=False
         )
@@ -226,42 +229,42 @@ if __name__ == "__main__":
 
         try:
             ws_url = orchestrator.get_cdp_url()
-            print(f"[+] WebSocket URL de CDP obtenida: {ws_url}")
+            print(f"[+] CDP WebSocket URL obtained: {ws_url}")
 
             def on_network_event(event: NetworkEvent) -> None:
                 if event.response_body:
-                    print(f"\n[>>> EVENTO CDP CAPTURADO CON PAYLOAD JSON/DATOS <<<]")
+                    print(f"\n[>>> CAPTURED CDP EVENT WITH JSON/DATA PAYLOAD <<<]")
                     print(f"URL: {event.url}")
-                    print(f"Método: {event.method}")
-                    print(f"Estatus: {event.status_code}")
-                    print(f"Tipo Recurso / MIME: {event.resource_type} / {event.mime_type}")
-                    print(f"Cuerpo (primeros 200 caracteres): {event.response_body[:200]}...\n")
+                    print(f"Method: {event.method}")
+                    print(f"Status: {event.status_code}")
+                    print(f"Resource / MIME Type: {event.resource_type} / {event.mime_type}")
+                    print(f"Body (first 200 chars): {event.response_body[:200]}...\n")
 
             interceptor = CDPNetworkInterceptor(
                 cdp_ws_url=ws_url, on_event_callback=on_network_event
             )
             await interceptor.start()
 
-            print("[*] Navegando a endpoint JSON de prueba (httpbin.org/json)...")
+            print("[*] Navigating to test JSON endpoint (httpbin.org/json)...")
             req = urllib.request.Request(
                 "http://httpbin.org/json",
                 headers={"User-Agent": "Mozilla/5.0"}
             )
             try:
                 with urllib.request.urlopen(req, timeout=5.0) as resp:
-                    print(f"[+] Respuesta HTTP directa recibida con código {resp.status}")
+                    print(f"[+] Direct HTTP response received with status {resp.status}")
             except Exception as e:
-                print(f"[-] Error en navegación de prueba: {e}")
+                print(f"[-] Error in test navigation: {e}")
 
-            # Esperar a que el interceptor capture y procese los eventos de red
+            # Wait for interceptor to capture and process network events
             await asyncio.sleep(3)
 
             events = interceptor.get_captured_events()
-            print(f"[+] Total de eventos capturados: {len(events)}")
+            print(f"[+] Total captured events: {len(events)}")
 
             await interceptor.stop()
         finally:
-            print("[*] Deteniendo Chrome Orchestrator...")
+            print("[*] Stopping Chrome Orchestrator...")
             orchestrator.stop()
 
     asyncio.run(main())

@@ -129,6 +129,20 @@ class ChromeOrchestrator:
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def get_cdp_url(self) -> str:
+        url = f"http://127.0.0.1:{self.port}/json/version"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=3.0) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    return str(data["webSocketDebuggerUrl"])
+        except Exception as err:
+            raise RuntimeError(
+                f"No se pudo obtener la URL del WebSocket CDP en puerto {self.port}: {err}"
+            ) from err
+        raise RuntimeError(f"Respuesta no válida del endpoint CDP en puerto {self.port}.")
+
 
 if __name__ == "__main__":
     print("[*] Iniciando prueba de orquestación de Chrome...")

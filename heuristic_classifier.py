@@ -516,6 +516,8 @@ class HeuristicClassifier:
             any(kw in key for kw in entertainment_keywords) for key in keys_found
         )
 
+        total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)
+
         if total_noise_matches > 0 and (not has_sports_context or total_odds_count == 0 or noise_score >= pos_score):
             final_score = 0.0
 

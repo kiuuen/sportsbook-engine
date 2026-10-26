@@ -333,6 +333,10 @@ class HeuristicClassifier:
         frequency_bonus = min(call_count * 2.5, 12.0)
         temporal_polling_bonus = 10.0 if (call_count >= 2 and time_span_seconds >= 1.0) else 0.0
 
+        url_lower = url.lower()
+        ui_noise_keywords = ("locales/", "i18n/", "theme.json", "layout.json")
+        url_noise_penalty = 60.0 if any(kw in url_lower for kw in ui_noise_keywords) else 0.0
+
         raw_score = (
             pos_score
             + odds_score
@@ -341,9 +345,14 @@ class HeuristicClassifier:
             + frequency_bonus
             + temporal_polling_bonus
             - noise_score
+            - url_noise_penalty
         )
 
         final_score = max(0.0, min(100.0, raw_score))
+
+        # Mandatory Odds Gate: payloads without odds cannot exceed 40.0
+        if total_odds_count == 0:
+            final_score = min(final_score, 40.0)
 
         has_structural_relevance = total_odds_count >= 3 or len(significant_arrays) >= 2
         low_vocabulary = pos_score < 10.0

@@ -41,7 +41,10 @@
     "cdn-cgi/rum",
     "/translations/",
     "/assets/css/",
-    "/assets/media/"
+    "/assets/media/",
+    "locales/",
+    "theme.json",
+    "layout.json"
   ],
   "allowed_content_types": [
     "application/json",

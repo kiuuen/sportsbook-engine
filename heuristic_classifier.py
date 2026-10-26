@@ -268,6 +268,8 @@ if __name__ == "__main__":
         print("  LIVE SPORTSBOOK API HEURISTIC CLASSIFIER HARNESS")
         print("=======================================================\n")
 
+        target_url = input("Enter target sportsbook URL (or press Enter for blank): ").strip()
+
         classifier = HeuristicClassifier("sportsbook_lexicon.json")
         orchestrator = ChromeOrchestrator(
             profile_name="heuristic_harness_profile", port=9222, headless=False
@@ -282,6 +284,12 @@ if __name__ == "__main__":
 
             interceptor = CDPNetworkInterceptor(cdp_ws_url=ws_url)
             await interceptor.start()
+
+            if target_url:
+                if not target_url.startswith(("http://", "https://")):
+                    target_url = "https://" + target_url
+                print(f"[*] Navigating tab directly to target URL: {target_url}")
+                await interceptor._send_command("Page.navigate", {"url": target_url})
 
             print("\n-------------------------------------------------------")
             print("OPERATOR ACTION REQUIRED:")

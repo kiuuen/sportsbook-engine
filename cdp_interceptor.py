@@ -145,23 +145,32 @@ class CDPNetworkInterceptor:
 
         if method == "Network.requestWillBeSent":
             request_info = params.get("request", {})
+            req_url = request_info.get("url", "")
+            req_method = request_info.get("method", "GET")
             self._pending_requests[request_id] = {
-                "url": request_info.get("url", ""),
-                "method": request_info.get("method", "GET"),
+                "url": req_url,
+                "method": req_method,
                 "request_headers": request_info.get("headers", {}),
                 "timestamp": params.get("timestamp", time.time()),
             }
+            print(f"[>>] Request starting: {req_method} {req_url}")
 
         elif method == "Network.responseReceived":
-            if request_id in self._pending_requests:
-                response = params.get("response", {})
-                self._pending_requests[request_id].update(
-                    {
-                        "status_code": response.get("status", 0),
-                        "mime_type": response.get("mimeType", ""),
-                        "resource_type": params.get("type", ""),
-                    }
-                )
+            response = params.get("response", {})
+            if request_id not in self._pending_requests:
+                self._pending_requests[request_id] = {
+                    "url": response.get("url", ""),
+                    "method": "GET",
+                    "request_headers": {},
+                    "timestamp": params.get("timestamp", time.time()),
+                }
+            self._pending_requests[request_id].update(
+                {
+                    "status_code": response.get("status", 0),
+                    "mime_type": response.get("mimeType", ""),
+                    "resource_type": params.get("type", ""),
+                }
+            )
 
         elif method == "Network.loadingFinished":
             if request_id in self._pending_requests:
@@ -211,6 +220,10 @@ class CDPNetworkInterceptor:
 
         self.captured_events.append(event)
         self._pending_requests.pop(request_id, None)
+
+        print(
+            f"[>>] Intercepted: {event.method} {event.url} ({event.status_code} / {event.mime_type})"
+        )
 
         if self.on_event_callback:
             try:

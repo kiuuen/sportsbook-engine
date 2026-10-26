@@ -138,6 +138,50 @@ class CDPNetworkInterceptor:
         except Exception as err:
             logging.error(f"[CDP] Error in listen loop: {err}")
 
+    @staticmethod
+    def _is_api_candidate(url: str, mime_type: str = "", resource_type: str = "") -> bool:
+        url_lower = url.lower()
+        trackers = (
+            "facebook.com",
+            "google-analytics.com",
+            "googletagmanager.com",
+            "doubleclick.net",
+            "sentry.io",
+            "datadoghq.com",
+            "hotjar.com",
+            "segment.io",
+            "mixpanel.com",
+            "analytics",
+        )
+        if any(tracker in url_lower for tracker in trackers):
+            return False
+
+        ignored_extensions = (
+            ".css",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".svg",
+            ".ico",
+            ".woff",
+            ".woff2",
+            ".ttf",
+            ".eot",
+            ".mp4",
+            ".webp",
+        )
+        if any(url_lower.endswith(ext) or f"{ext}?" in url_lower for ext in ignored_extensions):
+            return False
+
+        if resource_type in ("XHR", "Fetch") or "json" in mime_type.lower():
+            return True
+
+        if not mime_type and not resource_type:
+            return True
+
+        return False
+
     def _handle_cdp_event(self, method: str, params: Dict[str, Any]) -> None:
         request_id = params.get("requestId")
         if not request_id:
@@ -153,7 +197,8 @@ class CDPNetworkInterceptor:
                 "request_headers": request_info.get("headers", {}),
                 "timestamp": params.get("timestamp", time.time()),
             }
-            print(f"[>>] Request starting: {req_method} {req_url}")
+            if self._is_api_candidate(req_url):
+                print(f"[>>] Request starting: {req_method} {req_url}")
 
         elif method == "Network.responseReceived":
             response = params.get("response", {})
@@ -185,8 +230,8 @@ class CDPNetworkInterceptor:
     ) -> None:
         resource_type = req_data.get("resource_type", "")
         mime_type = req_data.get("mime_type", "").lower()
+        req_url = req_data.get("url", "")
 
-        # Filter structured payloads (JSON / XHR / Fetch) to optimize memory
         is_structured_data = (
             resource_type in ("XHR", "Fetch")
             or "json" in mime_type
@@ -194,7 +239,7 @@ class CDPNetworkInterceptor:
         )
 
         body: Optional[str] = None
-        if is_structured_data:
+        if is_structured_data and self._is_api_candidate(req_url, mime_type, resource_type):
             try:
                 result = await self._send_command(
                     "Network.getResponseBody", {"requestId": request_id}
@@ -209,11 +254,11 @@ class CDPNetworkInterceptor:
 
         event = NetworkEvent(
             request_id=request_id,
-            url=req_data.get("url", ""),
+            url=req_url,
             method=req_data.get("method", "GET"),
             request_headers=req_data.get("request_headers", {}),
             status_code=req_data.get("status_code", 0),
-            mime_type=req_data.get("mime_type", ""),
+            mime_type=mime_type,
             resource_type=resource_type,
             response_body=body,
         )
@@ -221,9 +266,10 @@ class CDPNetworkInterceptor:
         self.captured_events.append(event)
         self._pending_requests.pop(request_id, None)
 
-        print(
-            f"[>>] Intercepted: {event.method} {event.url} ({event.status_code} / {event.mime_type})"
-        )
+        if self._is_api_candidate(req_url, mime_type, resource_type) and body is not None:
+            print(
+                f"[>>] Intercepted API: {event.method} {event.url} ({event.status_code} / {event.mime_type})"
+            )
 
         if self.on_event_callback:
             try:

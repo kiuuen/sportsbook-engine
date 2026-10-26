@@ -159,12 +159,21 @@ class ChromeOrchestrator:
     def stop(self) -> None:
         if self.process:
             if self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=2.0)
+                if os.name == "nt":
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        capture_output=True,
+                        creationflags=creationflags,
+                        check=False,
+                    )
+                else:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=2.0)
             self.process = None
 
     def is_running(self) -> bool:

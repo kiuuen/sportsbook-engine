@@ -350,7 +350,11 @@ class HeuristicClassifier:
         temporal_polling_bonus = 10.0 if (call_count >= 2 and time_span_seconds >= 1.0) else 0.0
 
         url_lower = url.lower()
-        url_noise_penalty = 60.0 if any(kw in url_lower for kw in self.ignored_url_keywords) else 0.0
+        url_path_lower = urllib.parse.urlparse(url).path.lower()
+        url_noise_penalty = 60.0 if (
+            any(kw in url_lower for kw in self.ignored_url_keywords)
+            or "translation" in url_path_lower
+        ) else 0.0
 
         raw_score = (
             pos_score
@@ -625,29 +629,33 @@ if __name__ == "__main__":
                     if res.is_grey_zone:
                         print(f"    [!] GREY ZONE DETECTED - Candidate terms: {res.ambiguous_keys[:5]}")
 
-                # Execute Automated Replay Probe for top candidate
-                top_candidate = results[0]
-                if top_candidate.sample_event:
-                    print("\n=======================================================")
-                    print("     AUTOMATED STANDALONE REPLAY PROBE (TOP ENDPOINT)   ")
-                    print("=======================================================")
-                    print(f"[*] Executing headless HTTP replay for: {top_candidate.url}")
+                # Execute Automated Replay Probe for top candidate with odds_count >= 5
+                eligible_candidates = [r for r in results if r.odds_count >= 5]
+                if eligible_candidates:
+                    top_candidate = eligible_candidates[0]
+                    if top_candidate.sample_event:
+                        print("\n=======================================================")
+                        print("     AUTOMATED STANDALONE REPLAY PROBE (TOP ENDPOINT)   ")
+                        print("=======================================================")
+                        print(f"[*] Executing headless HTTP replay for: {top_candidate.url}")
 
-                    success, msg, headers_used, json_preview = AutomatedReplayProber.replay_candidate_endpoint(
-                        top_candidate.sample_event
-                    )
+                        success, msg, headers_used, json_preview = AutomatedReplayProber.replay_candidate_endpoint(
+                            top_candidate.sample_event
+                        )
 
-                    print(f"[+] Replay Verification Result: {'SUCCESS' if success else 'FAILED'}")
-                    print(f"    Message: {msg}")
-                    print(f"    Final Parameterized Template: {top_candidate.url_template}")
-                    print("    Minimal Required Headers:")
-                    for h_k, h_v in list(headers_used.items())[:6]:
-                        print(f"      - {h_k}: {h_v}")
+                        print(f"[+] Replay Verification Result: {'SUCCESS' if success else 'FAILED'}")
+                        print(f"    Message: {msg}")
+                        print(f"    Final Parameterized Template: {top_candidate.url_template}")
+                        print("    Minimal Required Headers:")
+                        for h_k, h_v in list(headers_used.items())[:6]:
+                            print(f"      - {h_k}: {h_v}")
 
-                    if success and json_preview:
-                        print("\n    JSON Payload Preview (5 lines):")
-                        for line in json_preview.splitlines():
-                            print(f"      {line}")
+                        if success and json_preview:
+                            print("\n    JSON Payload Preview (5 lines):")
+                            for line in json_preview.splitlines():
+                                print(f"      {line}")
+                else:
+                    print("\n[-] No candidate endpoint met the minimum odds threshold (odds_count >= 5) for replay probe.")
 
                 # Execute Guarded Post-Discovery Noise Assistant for residual traffic
                 NoiseAssistant.process_noise_domains(

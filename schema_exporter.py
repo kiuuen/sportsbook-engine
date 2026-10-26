@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from cdp_interceptor import NetworkEvent
+from cdp_interceptor import NetworkEvent, CDPNetworkInterceptor
 from heuristic_classifier import ClassificationResult, HeuristicClassifier, RouteTemplateDeducer, AutomatedReplayProber, NoiseAssistant
 from browser_orchestrator import ChromeOrchestrator
 from database_manager import DatabaseManager

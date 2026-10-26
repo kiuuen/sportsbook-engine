@@ -71,25 +71,37 @@ class SchemaExporter:
         return f'curl -X {method} "{url}"'
 
     @staticmethod
-    def _truncate_payload(data: Any, max_list_items: int = 3) -> Any:
-        """Recursively truncate large nested arrays and dict objects.
+    def _summarize_payload(data: Any, max_depth: int = 3) -> Any:
+        """Generate a compact structural summary of a JSON payload.
 
         Args:
-            data: JSON serializable value (dict, list, primitive).
-            max_list_items: Maximum number of items to retain in any array.
+            data: JSON serializable value.
+            max_depth: Maximum recursion depth for nested structures.
 
         Returns:
-            A deep copy of ``data`` where every array exceeding ``max_list_items``
-            is truncated to the first *max_list_items* elements.
+            A lightweight representation retaining structure with truncated values.
         """
-        if isinstance(data, list):
-            if len(data) > max_list_items:
-                truncated = data[:max_list_items]
-                return [SchemaExporter._truncate_payload(item, max_list_items) for item in truncated]
-            else:
-                return [SchemaExporter._truncate_payload(item, max_list_items) for item in data]
-        elif isinstance(data, dict):
-            return {k: SchemaExporter._truncate_payload(v, max_list_items) for k, v in data.items()}
+        if max_depth <= 0:
+            if isinstance(data, dict):
+                return "{...}"
+            if isinstance(data, list):
+                return "[...]"
+            return "..."
+
+        if isinstance(data, dict):
+            summary: Dict[str, Any] = {}
+            for i, (k, v) in enumerate(data.items()):
+                if i >= 8:
+                    summary["_truncated_keys"] = f"+{len(data) - 8} keys"
+                    break
+                summary[k] = SchemaExporter._summarize_payload(v, max_depth - 1)
+            return summary
+        elif isinstance(data, list):
+            if not data:
+                return []
+            return [SchemaExporter._summarize_payload(data[0], max_depth - 1)]
+        elif isinstance(data, str):
+            return data[:30] + "..." if len(data) > 30 else data
         else:
             return data
 
@@ -115,9 +127,9 @@ class SchemaExporter:
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
         for res in classified_results:
-            # Strict Odds Filter: exclude zero-odds candidates
+            # Strict Odds Threshold: only export core endpoints with odds_count >= 5
             odds_count: int = getattr(res, "odds_count", 0)
-            if odds_count == 0:
+            if odds_count < 5:
                 continue
 
             sample_ev: Optional[NetworkEvent] = getattr(res, "sample_event", None)
@@ -149,27 +161,32 @@ class SchemaExporter:
 
             curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers)
 
-            # Truncate nested payload arrays (keep max 3 items)
-            sanitized_payload: Any = parsed_payload
+            # Lightweight Structural Summary for sample_response
+            sanitized_payload: Any = {}
             try:
-                sanitized_payload = self._truncate_payload(parsed_payload, max_list_items=3)
+                sanitized_payload = self._summarize_payload(parsed_payload)
+                preview_str = json.dumps(sanitized_payload, indent=2)
 
-                # Cap max serialized size to ~8 KB to keep schema clean and lightweight
-                try:
-                    payload_json = json.dumps(sanitized_payload, separators=(',', ':'))
-                    max_bytes = 8192
-                    if len(payload_json.encode('utf-8')) > max_bytes:
-                        for limit in (2, 1):
-                            sanitized_payload = self._truncate_payload(parsed_payload, max_list_items=limit)
-                            payload_json = json.dumps(sanitized_payload, separators=(',', ':'))
-                            if len(payload_json.encode('utf-8')) <= max_bytes:
-                                break
-                except Exception as json_err:
-                    logging.warning(f"Size-check failed for payload: {json_err}")
-                    sanitized_payload = {}
+                # Cap preview at max 15 lines or 1 KB (1024 bytes)
+                if len(preview_str.encode("utf-8")) > 1024 or len(preview_str.splitlines()) > 15:
+                    if isinstance(parsed_payload, dict):
+                        sanitized_payload = {
+                            "top_level_keys": list(parsed_payload.keys())[:10],
+                            "_type": "dict_summary",
+                        }
+                    elif isinstance(parsed_payload, list):
+                        sanitized_payload = {
+                            "item_count": len(parsed_payload),
+                            "sample_item_keys": (
+                                list(parsed_payload[0].keys())[:10]
+                                if parsed_payload and isinstance(parsed_payload[0], dict)
+                                else []
+                            ),
+                            "_type": "list_summary",
+                        }
             except Exception as trunc_err:
-                logging.warning(f"Payload truncation error: {trunc_err}")
-                sanitized_payload = parsed_payload
+                logging.warning(f"Payload summarization error: {trunc_err}")
+                sanitized_payload = {"error": "payload_summarization_failed"}
 
             endpoint_data = {
                 "method": method,

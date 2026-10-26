@@ -183,6 +183,54 @@ class CDPNetworkInterceptor:
 
         return False
 
+    async def _process_completed_request(
+        self, request_id: str, req_data: Dict[str, Any]
+    ) -> None:
+        url = req_data.get("url", "")
+        method = req_data.get("method", "GET")
+        mime_type = req_data.get("mime_type", "")
+        resource_type = req_data.get("resource_type", "")
+
+        response_body: Optional[str] = None
+
+        if self._is_api_candidate(url, mime_type, resource_type):
+            try:
+                result = await self._send_command(
+                    "Network.getResponseBody", {"requestId": request_id}
+                )
+                body_data = result.get("body", "")
+                if result.get("base64Encoded", False):
+                    response_body = base64.b64decode(body_data).decode("utf-8", errors="replace")
+                else:
+                    response_body = body_data
+            except Exception as err:
+                logging.debug(f"[CDP] Failed to get response body for {request_id} ({url}): {err}")
+
+        self._pending_requests.pop(request_id, None)
+
+        event = NetworkEvent(
+            request_id=request_id,
+            url=url,
+            method=method,
+            request_headers=req_data.get("request_headers", {}),
+            status_code=req_data.get("status_code", 0),
+            mime_type=mime_type,
+            resource_type=resource_type,
+            response_body=response_body,
+            timestamp=req_data.get("timestamp", time.time()),
+        )
+
+        self.captured_events.append(event)
+
+        if response_body and self._is_api_candidate(url, mime_type, resource_type):
+            print(f"[>>] Captured HTTP response ({method}): {url} ({len(response_body)} bytes)")
+
+        if self.on_event_callback:
+            try:
+                self.on_event_callback(event)
+            except Exception as callback_err:
+                logging.error(f"[CDP] Error in event callback: {callback_err}")
+
     def _handle_cdp_event(self, method: str, params: Dict[str, Any]) -> None:
         request_id = params.get("requestId")
         if not request_id:

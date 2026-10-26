@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from browser_orchestrator import ChromeOrchestrator
 from cdp_interceptor import CDPNetworkInterceptor, NetworkEvent
+from schema_exporter import SchemaExporter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -663,6 +664,15 @@ if __name__ == "__main__":
                     classified_results=results,
                     target_url=target_url,
                 )
+
+                # Export validated blueprint schema to JSON file
+                exporter = SchemaExporter()
+                saved_path = exporter.export_schema(
+                    target_url=target_url,
+                    classified_results=results,
+                    events=events,
+                )
+                print(f"\n[+] Discovery Blueprint Schema persisted successfully to: {saved_path.resolve()}")
 
             print("\n=======================================================\n")
 

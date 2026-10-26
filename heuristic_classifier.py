@@ -23,6 +23,7 @@ class ClassificationResult:
     category_scores: Dict[str, float]
     odds_count: int
     matched_keywords: Set[str] = field(default_factory=set)
+    core_betting_matches: int = 0
     is_grey_zone: bool = False
     ambiguous_keys: List[str] = field(default_factory=list)
     call_count: int = 1
@@ -158,6 +159,13 @@ class RouteTemplateDeducer:
 
 class HeuristicClassifier:
 
+    CATEGORY_WEIGHTS: Dict[str, float] = {
+        "betting_markets_and_odds": 36.0,
+        "sports_event_metadata": 12.0,
+        "live_state_and_settlement": 18.0,
+        "provider_identifiers_and_abbreviations": 12.0,
+    }
+
     def __init__(self, lexicon_path: str = "sportsbook_lexicon.json") -> None:
         self.lexicon_mgr: LexiconManager = LexiconManager(lexicon_path)
 
@@ -167,21 +175,37 @@ class HeuristicClassifier:
         keys_found: List[str],
         numeric_values: List[float],
         array_lengths: List[int],
+        contextual_numerics: Optional[List[Tuple[str, float]]] = None,
+        parent_key: str = "",
     ) -> None:
+        if contextual_numerics is None:
+            contextual_numerics = []
+
         if isinstance(node, dict):
             for k, v in node.items():
-                keys_found.append(str(k).lower())
-                self._inspect_node(v, keys_found, numeric_values, array_lengths)
+                key_str = str(k).lower()
+                keys_found.append(key_str)
+                self._inspect_node(
+                    v, keys_found, numeric_values, array_lengths, contextual_numerics, parent_key=key_str
+                )
         elif isinstance(node, list):
             array_lengths.append(len(node))
             for item in node:
-                self._inspect_node(item, keys_found, numeric_values, array_lengths)
+                self._inspect_node(
+                    item, keys_found, numeric_values, array_lengths, contextual_numerics, parent_key=parent_key
+                )
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
-            numeric_values.append(float(node))
+            val = float(node)
+            numeric_values.append(val)
+            if parent_key:
+                contextual_numerics.append((parent_key, val))
         elif isinstance(node, str):
             if re.match(r"^-?\d+(\.\d+)?$", node.strip()):
                 try:
-                    numeric_values.append(float(node.strip()))
+                    val = float(node.strip())
+                    numeric_values.append(val)
+                    if parent_key:
+                        contextual_numerics.append((parent_key, val))
                 except ValueError:
                     pass
 
@@ -230,8 +254,9 @@ class HeuristicClassifier:
         keys_found: List[str] = []
         numeric_values: List[float] = []
         array_lengths: List[int] = []
+        contextual_numerics: List[Tuple[str, float]] = []
 
-        self._inspect_node(data, keys_found, numeric_values, array_lengths)
+        self._inspect_node(data, keys_found, numeric_values, array_lengths, contextual_numerics)
 
         if not keys_found and not numeric_values:
             return ClassificationResult(
@@ -246,6 +271,7 @@ class HeuristicClassifier:
             )
 
         matched_keywords: Set[str] = set()
+        core_betting_matched_terms: Set[str] = set()
         category_matches: Dict[str, int] = {
             cat: 0 for cat in self.lexicon_mgr.POSITIVE_CATEGORIES | self.lexicon_mgr.NOISE_CATEGORIES
         }
@@ -259,10 +285,14 @@ class HeuristicClassifier:
                         if term in tokens_set:
                             category_matches[cat] += 1
                             matched_keywords.add(term)
+                            if cat == "betting_markets_and_odds":
+                                core_betting_matched_terms.add(term)
                     else:
                         if term in key or term in tokens_set:
                             category_matches[cat] += 1
                             matched_keywords.add(term)
+                            if cat == "betting_markets_and_odds":
+                                core_betting_matched_terms.add(term)
 
             for cat, terms in self.lexicon_mgr.noise_keywords.items():
                 for term in terms:
@@ -277,11 +307,22 @@ class HeuristicClassifier:
         american_odds_count = sum(1 for v in numeric_values if self._is_american_odds(v))
         total_odds_count = decimal_odds_count + american_odds_count
 
+        core_terms = self.lexicon_mgr.positive_keywords.get("betting_markets_and_odds", set())
+        contextual_odds_count = 0
+        for parent_key, val in contextual_numerics:
+            if self._is_decimal_odds(val) or self._is_american_odds(val):
+                key_tokens = set(re.split(r"[_\-\s\.]", parent_key))
+                if any(term in parent_key or term in key_tokens for term in core_terms):
+                    contextual_odds_count += 1
+
+        contextual_odds_bonus = min(contextual_odds_count * 3.0, 15.0)
+
         significant_arrays = [l for l in array_lengths if l >= 2]
         array_repetition_score = min(len(significant_arrays) * 5.0, 25.0)
 
         pos_score = sum(
-            category_matches[cat] * 12.0 for cat in self.lexicon_mgr.POSITIVE_CATEGORIES
+            category_matches[cat] * self.CATEGORY_WEIGHTS.get(cat, 12.0)
+            for cat in self.lexicon_mgr.POSITIVE_CATEGORIES
         )
         noise_score = sum(
             category_matches[cat] * 15.0 for cat in self.lexicon_mgr.NOISE_CATEGORIES
@@ -289,13 +330,13 @@ class HeuristicClassifier:
 
         odds_score = min(total_odds_count * 4.0, 35.0)
 
-        # Temporal & Frequency Scoring Boost
         frequency_bonus = min(call_count * 2.5, 12.0)
         temporal_polling_bonus = 10.0 if (call_count >= 2 and time_span_seconds >= 1.0) else 0.0
 
         raw_score = (
             pos_score
             + odds_score
+            + contextual_odds_bonus
             + array_repetition_score
             + frequency_bonus
             + temporal_polling_bonus
@@ -331,6 +372,7 @@ class HeuristicClassifier:
             category_scores=cat_score_dict,
             odds_count=total_odds_count,
             matched_keywords=matched_keywords,
+            core_betting_matches=len(core_betting_matched_terms),
             is_grey_zone=is_grey_zone,
             ambiguous_keys=ambiguous_keys[:20],
             call_count=call_count,
@@ -538,7 +580,10 @@ if __name__ == "__main__":
                 if res.score > 0.0 or res.is_grey_zone:
                     results.append(res)
 
-            results.sort(key=lambda r: (r.score, r.odds_count, r.call_count), reverse=True)
+            results.sort(
+                key=lambda r: (r.score, r.core_betting_matches, r.odds_count, r.call_count),
+                reverse=True,
+            )
 
             print("=======================================================")
             print("         SCORED CANDIDATE ENDPOINTS SUMMARY            ")

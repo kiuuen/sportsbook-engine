@@ -54,9 +54,42 @@ class ChromeOrchestrator:
             "Google Chrome executable was not found in standard Windows paths."
         )
 
-    def start(self, timeout: float = 15.0) -> bool:
+    def _cleanup_port_if_busy(self) -> None:
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                creationflags=creationflags,
+                check=False,
+            )
+            if result.returncode != 0 or not result.stdout:
+                return
+
+            target_port_str = f":{self.port}"
+            for line in result.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and "LISTENING" in parts:
+                    local_addr = parts[1]
+                    if local_addr.endswith(target_port_str):
+                        pid_str = parts[-1]
+                        if pid_str.isdigit() and int(pid_str) != 0:
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", pid_str],
+                                capture_output=True,
+                                creationflags=creationflags,
+                                check=False,
+                            )
+                            time.sleep(0.5)
+        except Exception:
+            pass
+
+    def start(self, timeout: float = 15.0, initial_url: Optional[str] = None) -> bool:
         if self.process and self.process.poll() is None:
             return True  # Already running
+
+        self._cleanup_port_if_busy()
 
         chrome_exe = self._find_chrome_executable()
 
@@ -72,6 +105,9 @@ class ChromeOrchestrator:
 
         if self.headless:
             cmd.append("--headless=new")
+
+        if initial_url:
+            cmd.append(initial_url)
 
         # Start process without popup window on Windows
         creationflags = 0
@@ -134,7 +170,7 @@ class ChromeOrchestrator:
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def get_cdp_url(self) -> str:
+    def get_cdp_url(self, target_url: Optional[str] = None) -> str:
         url = f"http://127.0.0.1:{self.port}/json/list"
         try:
             req = urllib.request.Request(url, method="GET")
@@ -142,12 +178,25 @@ class ChromeOrchestrator:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     if isinstance(data, list):
-                        for target in data:
-                            if (
-                                target.get("type") == "page"
-                                and "webSocketDebuggerUrl" in target
-                            ):
-                                return str(target["webSocketDebuggerUrl"])
+                        page_targets = [
+                            t for t in data
+                            if t.get("type") == "page" and "webSocketDebuggerUrl" in t
+                        ]
+                        if not page_targets:
+                            raise RuntimeError(f"No valid page target found on CDP endpoint on port {self.port}.")
+
+                        if target_url:
+                            norm_target = target_url.lower().rstrip("/")
+                            for pt in page_targets:
+                                page_url = str(pt.get("url", "")).lower().rstrip("/")
+                                if norm_target in page_url or page_url in norm_target:
+                                    return str(pt["webSocketDebuggerUrl"])
+
+                        for pt in page_targets:
+                            if pt.get("url") and pt.get("url") != "about:blank":
+                                return str(pt["webSocketDebuggerUrl"])
+
+                        return str(page_targets[0]["webSocketDebuggerUrl"])
         except Exception as err:
             raise RuntimeError(
                 f"Failed to obtain CDP WebSocket URL on port {self.port}: {err}"

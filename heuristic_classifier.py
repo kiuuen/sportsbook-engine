@@ -269,6 +269,8 @@ if __name__ == "__main__":
         print("=======================================================\n")
 
         target_url = input("Enter target sportsbook URL (or press Enter for blank): ").strip()
+        if target_url and not target_url.startswith(("http://", "https://")):
+            target_url = "https://" + target_url
 
         classifier = HeuristicClassifier("sportsbook_lexicon.json")
         orchestrator = ChromeOrchestrator(
@@ -276,20 +278,14 @@ if __name__ == "__main__":
         )
 
         print("[*] Launching browser instance...")
-        orchestrator.start(timeout=15.0)
+        orchestrator.start(timeout=15.0, initial_url=target_url if target_url else None)
 
         try:
-            ws_url = orchestrator.get_cdp_url()
+            ws_url = orchestrator.get_cdp_url(target_url=target_url if target_url else None)
             print(f"[+] CDP WebSocket URL acquired: {ws_url}")
 
             interceptor = CDPNetworkInterceptor(cdp_ws_url=ws_url)
             await interceptor.start()
-
-            if target_url:
-                if not target_url.startswith(("http://", "https://")):
-                    target_url = "https://" + target_url
-                print(f"[*] Navigating tab directly to target URL: {target_url}")
-                await interceptor._send_command("Page.navigate", {"url": target_url})
 
             print("\n-------------------------------------------------------")
             print("OPERATOR ACTION REQUIRED:")

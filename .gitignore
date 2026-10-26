@@ -54,3 +54,6 @@ data/schemas/*.json
 # ============================================
 *.chat.history.md
 *.prompt.md
+# Ignorar todos los archivos JSON (tanto en la raíz como en subcarpetas)
+*.json
+main_url.md

@@ -1,4 +1,0 @@
-{
-    "C_Cpp.errorSquiggles": "disabled",
-    "c-cpp-compile-run.cpp-flags": "-Wall -Wextra -g3 -lws2_32 -lcrypt32"
-}

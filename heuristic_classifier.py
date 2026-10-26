@@ -494,38 +494,60 @@ class HeuristicClassifier:
 
         final_score = max(0.0, min(100.0, raw_score))
 
+        produced_params = self._extract_produced_identifiers(keys_found)
+        role, volatility = self._deduce_role_and_volatility(
+            url_template=url_template,
+            total_odds_count=total_odds_count,
+            call_count=call_count,
+            time_span_seconds=time_span_seconds,
+            pos_score=pos_score,
+            significant_arrays_count=len(significant_arrays),
+        )
+
+        total_pos_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.POSITIVE_CATEGORIES)
+        total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)
+        favorable_signal_ratio = total_pos_matches > (total_noise_matches * 1.5) and pos_score >= noise_score
+        is_detailed_or_realtime = (role == "odds_detail" or volatility == "realtime")
+        significant_arrays = [l for l in array_lengths if l >= 2]
+        has_structural_repetition = len(significant_arrays) >= 1
+
         # Enforce strict zero-scoring for noise categories or non-target entertainment catalogs
         has_entertainment_signals = any(term in url_lower for term in self.lexicon_mgr.all_noise_terms) or any(
             any(term in key for term in self.lexicon_mgr.all_noise_terms) for key in keys_found
         )
 
-        total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)
-
-        if total_noise_matches > 0 and (not has_sports_context or total_odds_count == 0 or noise_score >= pos_score):
+        if total_noise_matches > 0 and (not has_sports_context or noise_score >= pos_score):
             final_score = 0.0
 
-        if has_entertainment_signals and (not has_sports_context or total_odds_count < 2):
+        if has_entertainment_signals and not has_sports_context:
             final_score = 0.0
 
         # Disqualify payloads dominated by UI/theme styling tokens or generic casino catalogs without sports context
-        if style_token_count >= 3 or (style_token_count > 0 and total_odds_count == 0):
+        if style_token_count >= 3 or (style_token_count > 0 and not has_sports_context and total_odds_count == 0):
             final_score = 0.0
 
-        if casino_matches > 0 and (total_odds_count == 0 or not has_sports_context):
+        if casino_matches > 0 and not has_sports_context:
             final_score = 0.0
 
         if total_odds_count == 0:
-            final_score = min(final_score, 40.0)
+            is_valid_catalog = (
+                has_sports_context
+                and favorable_signal_ratio
+                and not is_detailed_or_realtime
+                and (category_matches.get("sports_event_metadata", 0) > 0 or has_structural_repetition or pos_score >= 12.0)
+            )
+            if not is_valid_catalog:
+                final_score = min(final_score, 40.0)
 
         # Composite Signal-to-Noise Confidence Validation
-        total_pos_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.POSITIVE_CATEGORIES)
-        total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)
         active_pos_categories_count = sum(1 for cat in self.lexicon_mgr.POSITIVE_CATEGORIES if category_matches[cat] > 0)
 
         has_lexical_diversity = active_pos_categories_count >= 2 or len(core_betting_matched_terms) >= 1
-        has_structural_repetition = len(significant_arrays) >= 1
-        favorable_signal_ratio = total_pos_matches > (total_noise_matches * 1.5) and pos_score >= noise_score
-        has_adequate_odds = total_odds_count >= 5
+
+        if is_detailed_or_realtime:
+            has_adequate_odds = total_odds_count >= 5
+        else:
+            has_adequate_odds = total_odds_count >= 5 or (has_sports_context and has_structural_repetition)
 
         is_composite_confident = (
             final_score >= 45.0
@@ -562,16 +584,6 @@ class HeuristicClassifier:
         cat_score_dict = {
             cat: float(count) for cat, count in category_matches.items() if count > 0
         }
-
-        produced_params = self._extract_produced_identifiers(keys_found)
-        role, volatility = self._deduce_role_and_volatility(
-            url_template=url_template,
-            total_odds_count=total_odds_count,
-            call_count=call_count,
-            time_span_seconds=time_span_seconds,
-            pos_score=pos_score,
-            significant_arrays_count=len(significant_arrays),
-        )
 
         # Determine auxiliary widget tier dynamically based on content signals
         is_auxiliary_widget = (

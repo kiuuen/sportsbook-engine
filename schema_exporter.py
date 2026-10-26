@@ -248,10 +248,15 @@ class SchemaExporter:
             is_viable: bool = getattr(res, "is_viable", False)
             odds_count: int = getattr(res, "odds_count", 0)
             score: float = getattr(res, "score", 0.0)
+            role: str = getattr(res, "role", "catalog_root")
+            volatility: str = getattr(res, "volatility", "static")
 
             # Core requirements filter vs auxiliary capture
             if not is_auxiliary:
-                if not is_viable or odds_count < 5 or score < 45.0:
+                if not is_viable or score < 45.0:
+                    continue
+                is_detailed_or_realtime = (role == "odds_detail" or volatility == "realtime")
+                if is_detailed_or_realtime and odds_count < 5:
                     continue
                 if not self._verify_replay_candidate(sample_ev):
                     continue
@@ -273,8 +278,6 @@ class SchemaExporter:
                 logging.warning(f"Payload summarization error: {trunc_err}")
                 sanitized_payload = {"error": "payload_summarization_failed"}
 
-            role: str = getattr(res, "role", "catalog_root")
-            volatility: str = getattr(res, "volatility", "static")
             produced_params: List[str] = getattr(res, "produced_params", [])
 
             endpoint_data = {

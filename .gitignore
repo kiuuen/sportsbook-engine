@@ -4,7 +4,8 @@
 .env
 .env.*
 *.env
-
+.xml
+*.xml
 # ============================================
 # Databases & SQLite WAL/SHM (Bifrost & Engine)
 # ============================================
@@ -36,7 +37,8 @@ env/
 # ============================================
 # C++ Binaries & Visual Studio Artifacts
 # ============================================
-exercises/output/
+exercises/
+include/
 *.exe
 *.obj
 *.o
@@ -46,7 +48,6 @@ exercises/output/
 # ============================================
 # Generated Schemas (Outputs)
 # ============================================
-# Ignora los JSON generados del scraping, pero conserva los de config
 data/schemas/*.json
 
 # ============================================
@@ -54,6 +55,8 @@ data/schemas/*.json
 # ============================================
 *.chat.history.md
 *.prompt.md
-# Ignorar todos los archivos JSON (tanto en la raíz como en subcarpetas)
 *.json
 main_url.md
+*.bat
+
+CONVENTIONS.md

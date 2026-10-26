@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from browser_orchestrator import ChromeOrchestrator
 from cdp_interceptor import CDPNetworkInterceptor, NetworkEvent
-from schema_exporter import SchemaExporter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -751,6 +750,7 @@ class NoiseAssistant:
         else:
             print("[*] Skipped adding noise domains.")
 
+from schema_exporter import SchemaExporter
 
 if __name__ == "__main__":
     import asyncio

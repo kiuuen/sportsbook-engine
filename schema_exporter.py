@@ -66,7 +66,10 @@ class SchemaExporter:
 
     @staticmethod
     def _generate_curl(method: str, url: str, headers: Dict[str, str]) -> str:
-        header_flags = " ".join([f'-H "{k.lower()}: {v.replace(\'"\', \'\\\\"\')}"' for k, v in headers.items()])
+        header_flags = " ".join([
+            '-H "' + k.lower() + ": " + v.replace('"', '\\"') + '"'
+            for k, v in headers.items()
+        ])
         if header_flags:
             return f'curl -X {method} "{url}" {header_flags}'
         return f'curl -X {method} "{url}"'

@@ -140,7 +140,10 @@ class ReplayExecutor:
         hydrated_url = self.hydrate_url(template_url, params)
         headers = self._build_request_headers()
 
-        header_flags = " ".join([f'-H "{k.lower()}: {v.replace(\'"\', \'\\\\"\')}"' for k, v in headers.items()])
+        header_flags = " ".join([
+            '-H "' + k.lower() + ": " + v.replace('"', '\\"') + '"'
+            for k, v in headers.items()
+        ])
         if header_flags:
             return f'curl -X {method} "{hydrated_url}" {header_flags}'
         return f'curl -X {method} "{hydrated_url}"'

@@ -1,0 +1,51 @@
+{
+  "ignored_domains": [
+    "facebook.com",
+    "facebook.net",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "tp-eye.com",
+    "hotjar.com",
+    "sentry.io",
+    "datadoghq.com",
+    "cloudflareinsights.com",
+    "scor-s3-cdn.statscore.com",
+    "connect.facebook.net",
+    "sf16-website-login.neutral.ttwstatic.com",
+    "www.googletagmanager.com",
+    "static.cloudflareinsights.com",
+    "appleid.cdn-apple.com",
+    "unpkg.com",
+    "www.google.com.mx",
+    "fonts.googleapis.com",
+    "fonts.gstatic.com"
+  ],
+  "ignored_extensions": [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".css",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".mp4",
+    ".webm"
+  ],
+  "ignored_url_keywords": [
+    "cdn-cgi/rum",
+    "/translations/",
+    "/assets/css/",
+    "/assets/media/"
+  ],
+  "allowed_content_types": [
+    "application/json",
+    "text/json",
+    "application/problem+json"
+  ]
+}

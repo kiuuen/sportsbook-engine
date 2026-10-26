@@ -4,6 +4,7 @@ import logging
 import pathlib
 import re
 import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional, Set
 
 from cdp_interceptor import NetworkEvent
@@ -105,12 +106,42 @@ class SchemaExporter:
         else:
             return data
 
+    @staticmethod
+    def _verify_replay_candidate(event: NetworkEvent) -> bool:
+        if not event or not event.url:
+            return False
+
+        clean_headers: Dict[str, str] = {
+            k: v for k, v in event.request_headers.items()
+            if not k.startswith(":") and k.lower() not in ("host", "content-length")
+        }
+
+        if "User-Agent" not in clean_headers and "user-agent" not in clean_headers:
+            clean_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+        clean_headers["Accept"] = "application/json, text/plain, */*"
+
+        try:
+            req = urllib.request.Request(
+                url=event.url,
+                headers=clean_headers,
+                method=event.method if event.method else "GET",
+            )
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
+                if resp.status == 200:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    json.loads(body)
+                    return True
+        except Exception:
+            pass
+        return False
+
     def export_schema(
         self,
         target_url: str,
         classified_results: List[Any],
         events: List[NetworkEvent],
-    ) -> pathlib.Path:
+    ) -> Optional[pathlib.Path]:
         target_domain = self._extract_domain(target_url, events)
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -147,6 +178,10 @@ class SchemaExporter:
                 continue
 
             if not isinstance(parsed_payload, (dict, list)):
+                continue
+
+            # Replay Probe Gate: Verify endpoint reaches valid HTTP 200 JSON live response
+            if not self._verify_replay_candidate(sample_ev):
                 continue
 
             method = sample_ev.method if sample_ev.method else "GET"
@@ -197,6 +232,10 @@ class SchemaExporter:
             }
             endpoint_key = f"{method}_{template_url}"
             endpoints_dict[endpoint_key] = endpoint_data
+
+        if not endpoints_dict:
+            print("[!] Schema export aborted: No verified sportsbook APIs found for this target.")
+            return None
 
         schema_payload = {
             "target_domain": target_domain,

@@ -673,7 +673,8 @@ if __name__ == "__main__":
                         classified_results=results,
                         events=events,
                     )
-                    print(f"\n[+] Schema successfully exported to: {saved_path.resolve()}")
+                    if saved_path is not None:
+                        print(f"\n[+] Schema successfully exported to: {saved_path.resolve()}")
                 except Exception as err:
                     logging.error(f"[Exporter Error] Failed to export schema: {err}", exc_info=True)
 

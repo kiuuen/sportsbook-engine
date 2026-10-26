@@ -217,6 +217,35 @@ class ReplayExecutor:
             return f'curl -X {method} "{hydrated_url}" {header_flags}'
         return f'curl -X {method} "{hydrated_url}"'
 
+    @staticmethod
+    def clamp_preview(data: Any, max_lines: int = 10, max_chars: int = 1000) -> str:
+        if isinstance(data, (dict, list)):
+            text = json.dumps(data, indent=2)
+        else:
+            text = str(data)
+
+        lines = text.splitlines()
+        truncated = False
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            truncated = True
+
+        clamped_lines: List[str] = []
+        for line in lines:
+            if len(line) > 200:
+                clamped_lines.append(line[:200] + "...")
+                truncated = True
+            else:
+                clamped_lines.append(line)
+
+        result = "\n".join(clamped_lines)
+        if len(result) > max_chars:
+            result = result[:max_chars] + "... [truncated]"
+        elif truncated:
+            result += "\n... [truncated]"
+
+        return result
+
 
 if __name__ == "__main__":
     schema_dir = pathlib.Path("./data/schemas")
@@ -284,8 +313,7 @@ if __name__ == "__main__":
                     try:
                         resp_payload = executor.execute(ep_key)
                         print("    Status: [SUCCESS 200 OK]")
-                        json_str = json.dumps(resp_payload, indent=2)
-                        preview = "\n".join(json_str.splitlines()[:5])
+                        preview = ReplayExecutor.clamp_preview(resp_payload, max_lines=5, max_chars=500)
                         print(f"    Preview:\n{preview}")
                     except Exception as err:
                         print(f"    Status: [FAILED] - {err}")
@@ -299,8 +327,7 @@ if __name__ == "__main__":
                 print(f"[*] Executing live fetch for '{target_key}'...")
                 try:
                     response_data = executor.execute(target_key)
-                    json_str = json.dumps(response_data, indent=2)
-                    preview = "\n".join(json_str.splitlines()[:10])
-                    print(f"[+] Response Preview (First 10 lines):\n{preview}")
+                    preview = ReplayExecutor.clamp_preview(response_data, max_lines=10, max_chars=1000)
+                    print(f"[+] Response Preview:\n{preview}")
                 except Exception as ex:
                     print(f"[-] Execution failed: {ex}")

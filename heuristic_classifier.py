@@ -172,6 +172,19 @@ class HeuristicClassifier:
         "provider_identifiers_and_abbreviations": 12.0,
     }
 
+    STYLE_KEY_PATTERN: re.Pattern = re.compile(
+        r".*(color|margin|padding|border|radius|shadow|font|typography|palette|theme|style|dimension|flex|grid|align|justify).*",
+        re.IGNORECASE,
+    )
+    COLOR_MODEL_PATTERN: re.Pattern = re.compile(
+        r"^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$|^rgba?\(|^hsla?\(",
+        re.IGNORECASE,
+    )
+    DIMENSION_PATTERN: re.Pattern = re.compile(
+        r"^\d+(\.\d+)?(px|em|rem|vh|vw|pt)$",
+        re.IGNORECASE,
+    )
+
     def __init__(
         self,
         lexicon_path: str = "sportsbook_lexicon.json",
@@ -232,6 +245,7 @@ class HeuristicClassifier:
         structural_odds: List[float],
         array_lengths: List[int],
         contextual_numerics: List[Tuple[str, float]],
+        style_tokens_found: List[str],
         parent_key: str = "",
     ) -> None:
         if isinstance(node, dict):
@@ -239,6 +253,8 @@ class HeuristicClassifier:
             for k in node.keys():
                 k_str = str(k).lower()
                 keys_found.append(k_str)
+                if self.STYLE_KEY_PATTERN.match(k_str):
+                    style_tokens_found.append(k_str)
                 k_pos, _, _ = self._match_key_categories(k_str)
                 local_pos_in_keys.update(k_pos)
 
@@ -255,6 +271,7 @@ class HeuristicClassifier:
                     structural_odds=structural_odds,
                     array_lengths=array_lengths,
                     contextual_numerics=contextual_numerics,
+                    style_tokens_found=style_tokens_found,
                     parent_key=k_str,
                 )
         elif isinstance(node, list):
@@ -272,18 +289,23 @@ class HeuristicClassifier:
                     structural_odds=structural_odds,
                     array_lengths=array_lengths,
                     contextual_numerics=contextual_numerics,
+                    style_tokens_found=style_tokens_found,
                     parent_key=parent_key,
                 )
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
             val = float(node)
             if parent_key:
                 contextual_numerics.append((parent_key, val))
-            # Odds require structural co-occurrence in repetitive nodes alongside positive categories
             if is_repetitive_context and bool(ancestor_positive_categories):
                 if self._is_decimal_odds(val) or self._is_american_odds(val):
                     structural_odds.append(val)
         elif isinstance(node, str):
             clean_str = node.strip()
+            if self.COLOR_MODEL_PATTERN.match(clean_str) or self.DIMENSION_PATTERN.match(clean_str):
+                style_tokens_found.append(clean_str)
+            elif parent_key and self.STYLE_KEY_PATTERN.match(parent_key):
+                style_tokens_found.append(clean_str)
+
             if re.match(r"^-?\d+(\.\d+)?$", clean_str):
                 try:
                     val = float(clean_str)
@@ -383,6 +405,7 @@ class HeuristicClassifier:
         structural_odds: List[float] = []
         array_lengths: List[int] = []
         contextual_numerics: List[Tuple[str, float]] = []
+        style_tokens_found: List[str] = []
 
         self._traverse_relational_structures(
             node=data,
@@ -392,6 +415,7 @@ class HeuristicClassifier:
             structural_odds=structural_odds,
             array_lengths=array_lengths,
             contextual_numerics=contextual_numerics,
+            style_tokens_found=style_tokens_found,
             parent_key="",
         )
 
@@ -461,6 +485,13 @@ class HeuristicClassifier:
             or "translation" in url_path_lower
         ) else 0.0
 
+        style_token_count = len(style_tokens_found)
+        style_noise_penalty = style_token_count * 20.0
+
+        casino_matches = category_matches.get("noise_casino_and_promotions", 0)
+        has_sports_context = len(core_betting_matched_terms) > 0 or category_matches.get("sports_event_metadata", 0) > 0
+        casino_penalty = (casino_matches * 30.0) if not has_sports_context else 0.0
+
         raw_score = (
             pos_score
             + odds_score
@@ -470,9 +501,18 @@ class HeuristicClassifier:
             + temporal_polling_bonus
             - noise_score
             - url_noise_penalty
+            - style_noise_penalty
+            - casino_penalty
         )
 
         final_score = max(0.0, min(100.0, raw_score))
+
+        # Disqualify payloads dominated by UI/theme styling tokens or generic casino catalogs without sports context
+        if style_token_count >= 3 or (style_token_count > 0 and total_odds_count == 0):
+            final_score = 0.0
+
+        if casino_matches > 0 and (total_odds_count == 0 or not has_sports_context):
+            final_score = 0.0
 
         if total_odds_count == 0:
             final_score = min(final_score, 40.0)
@@ -493,6 +533,8 @@ class HeuristicClassifier:
             and has_structural_repetition
             and favorable_signal_ratio
             and has_adequate_odds
+            and style_token_count < 3
+            and (casino_matches == 0 or has_sports_context)
         )
 
         # Generic payloads failing composite confidence must not enter grey zone

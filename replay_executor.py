@@ -7,19 +7,164 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Set, Union
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from database_manager import DatabaseManager
+from heuristic_classifier import AutomatedReplayProber, HeuristicClassifier, RouteTemplateDeducer, NoiseAssistant
+from browser_orchestrator import ChromeOrchestrator
+from cdp_interceptor import NetworkEvent, CDPNetworkInterceptor
+from schema_exporter import SchemaExporter
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 class ReplayExecutor:
 
-    def __init__(self, schema_source: Union[str, pathlib.Path]) -> None:
-        self.schema_path: pathlib.Path = self._resolve_schema_path(schema_source)
-        self.schema_data: Dict[str, Any] = self._load_schema()
-        self.target_domain: str = self.schema_data.get("target_domain", "unknown_target")
-        self.session_headers: Dict[str, str] = self.schema_data.get("session", {}).get("essential_headers", {})
-        self.session_cookies: Dict[str, str] = self.schema_data.get("session", {}).get("cookies", {})
-        self.endpoints: Dict[str, Dict[str, Any]] = self.schema_data.get("endpoints", {})
-        self.dependency_graph: Dict[str, Any] = self.schema_data.get("dependency_graph", {})
+    def __init__(
+        self,
+        schema_source: Union[str, pathlib.Path, int],
+        db_manager: Optional[DatabaseManager] = None,
+    ) -> None:
+        # Store db_manager for later health logging; create default if none provided
+        self.db_manager = db_manager
+        if isinstance(schema_source, pathlib.Path):
+            source_path = schema_source
+        else:
+            source_path = pathlib.Path(schema_source)
+
+        # Case 1: existing JSON file
+        if source_path.is_file():
+            self.schema_path = source_path
+            # Original JSON loading logic (unchanged)
+            try:
+                with open(self.schema_path, "r", encoding="utf-8") as f:
+                    self.schema_data = json.load(f)
+            except Exception as err:
+                raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
+
+            # Derive attributes used later
+            self.target_domain = self.schema_data.get("target_domain", "unknown_target")
+            self.session_headers = self.schema_data.get("session", {}).get("essential_headers", {})
+            self.session_cookies = self.schema_data.get("session", {}).get("cookies", {})
+            self.endpoints = self.schema_data.get("endpoints", {})
+            self.dependency_graph = self.schema_data.get("dependency_graph", {})
+            return
+
+        # Cases 2 & 3: domain string or target_id integer – require DatabaseManager
+        if not self.db_manager:
+            self.db_manager = DatabaseManager(db_path="./data/control_plane.db")
+
+        # Try interpreting source as an integer target_id
+        try:
+            target_id = int(schema_source)
+            self._load_from_db(target_id)
+            return
+        except ValueError:
+            # Not an integer – treat as domain string
+            pass
+
+        # Domain lookup
+        target = self.db_manager.get_target_by_domain(schema_source)
+        if not target:
+            raise ValueError(f"Target domain '{schema_source}' not found in database.")
+        self._load_from_db(target["id"])
+
+    def _load_from_db(self, target_id: int) -> None:
+        """
+        Populate the ReplayExecutor from the SQLite control plane using the given target_id.
+        Raises ValueError if the target does not exist.
+        """
+        if not self.db_manager:
+            raise RuntimeError("DatabaseManager not provided for DB loading.")
+
+        # Fetch target record
+        conn = self.db_manager.get_connection()
+        row = conn.execute("SELECT * FROM targets WHERE id = ?", (target_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Target with id {target_id} not found.")
+        target_row = dict(row)
+
+        target_domain = target_row["domain"]
+        provider_family = target_row["provider_family"]
+        discovered_at = target_row["discovered_at"]
+        # canonical_pipeline_json is not needed for ReplayExecutor
+
+        # Fetch session
+        session_row = self.db_manager.get_session_by_target_id(target_id)
+        session_headers = json.loads(session_row["essential_headers_json"]) if session_row else {}
+        session_cookies = json.loads(session_row["cookies_json"]) if session_row else {}
+
+        # Fetch endpoints
+        endpoint_rows = self.db_manager.get_endpoints_by_target_id(target_id)
+        endpoints_dict: Dict[str, Dict[str, Any]] = {}
+        for ep in endpoint_rows:
+            ep_key = ep["endpoint_key"]
+            endpoint_info = {
+                "role": ep["role"],
+                "volatility": ep["volatility"],
+                "protocol": ep["protocol"],
+                "method": ep["method"],
+                "template_url": ep["template_url"],
+                "dynamic_parameters": json.loads(ep["dynamic_parameters_json"]),
+                "provides_parameters": json.loads(ep["provides_parameters_json"]),
+                "curl_command": ep["curl_command"],
+                "handshake_headers": json.loads(ep["handshake_headers_json"]),
+                "sample_response": json.loads(ep["sample_response_json"]),
+            }
+            # If duplicate keys exist, the last one wins – acceptable for this use-case
+            endpoints_dict[ep_key] = endpoint_info
+
+        # Fetch dependency graph
+        dep_row = self.db_manager.get_dependency_graph_by_target_id(target_id)
+        producers = json.loads(dep_row["producers_json"]) if dep_row else {}
+        consumers = json.loads(dep_row["consumers_json"]) if dep_row else {}
+        dependency_graph = {"producers": producers, "consumers": consumers}
+
+        # Build schema_data dict matching the structure used by DatabaseManager.save_schema_dict
+        self.schema_data = {
+            "target_domain": target_domain,
+            "provider_family": provider_family,
+            "discovered_at": discovered_at,
+            "session": {
+                "essential_headers": session_headers,
+                "cookies": session_cookies,
+            },
+            "endpoints": endpoints_dict,
+            "dependency_graph": dependency_graph,
+        }
+
+        # Store target_id for health-logging
+        self.target_id = target_id
+
+        # Initialise other attributes used by the original implementation
+        self.target_domain = target_domain
+        self.session_headers = session_headers
+        self.session_cookies = session_cookies
+        self.endpoints = endpoints_dict
+        self.dependency_graph = dependency_graph
+
+    def _log_health(
+        self,
+        endpoint_key: str,
+        status: str,
+        status_code: int,
+        message: str,
+        response_preview: str = "",
+    ) -> None:
+        """
+        Record a health/probe outcome in replay_health_logs if a DatabaseManager
+        and target_id are available. Errors are logged but not propagated.
+        """
+        if not self.db_manager or not hasattr(self, "target_id"):
+            return
+        try:
+            self.db_manager.log_replay_health(
+                target_id=self.target_id,
+                endpoint_key=endpoint_key,
+                status=status,
+                status_code=status_code,
+                message=message,
+                response_preview=response_preview,
+            )
+        except Exception as e:
+            logging.warning(f"[ReplayExecutor] Failed to log health record: {e}")
 
     @staticmethod
     def _resolve_schema_path(source: Union[str, pathlib.Path]) -> pathlib.Path:
@@ -150,22 +295,61 @@ class ReplayExecutor:
         try:
             req = urllib.request.Request(url=clean_url, headers=headers, method=method)
             with urllib.request.urlopen(req, timeout=10.0) as response:
-                if response.status == 200:
+                status_code = response.status
+                if status_code == 200:
                     body_text = response.read().decode("utf-8", errors="replace")
                     try:
                         json.loads(body_text)
+                        # Successful probe – log to DB
+                        self._log_health(
+                            endpoint_key=target_key,
+                            status="SUCCESS",
+                            status_code=200,
+                            message="Session health probe succeeded (HTTP 200 JSON).",
+                            response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
+                        )
                         logging.info(f"[ReplayExecutor] Session health probe succeeded (HTTP 200 JSON) on '{target_key}'.")
                         return True
                     except json.JSONDecodeError:
+                        # 200 but not JSON
+                        self._log_health(
+                            endpoint_key=target_key,
+                            status="FAILED",
+                            status_code=200,
+                            message="Health probe returned HTTP 200, but payload was not valid JSON.",
+                            response_preview="",
+                        )
                         logging.warning("[ReplayExecutor] Health probe returned HTTP 200, but payload was not valid JSON.")
                         return False
                 else:
-                    logging.warning(f"[ReplayExecutor] Health probe returned non-200 status: {response.status}")
+                    # Non-200 response
+                    self._log_health(
+                        endpoint_key=target_key,
+                        status="FAILED",
+                        status_code=status_code,
+                        message=f"Health probe returned non-200 status: {status_code}",
+                        response_preview="",
+                    )
+                    logging.warning(f"[ReplayExecutor] Health probe returned non-200 status: {status_code}")
                     return False
         except urllib.error.HTTPError as http_err:
+            self._log_health(
+                endpoint_key=target_key,
+                status="FAILED",
+                status_code=http_err.code,
+                message=f"Session health check failed with HTTP status {http_err.code}: {http_err.reason}",
+                response_preview="",
+            )
             logging.warning(f"[ReplayExecutor] Session health check failed with HTTP status {http_err.code}.")
             return False
         except Exception as err:
+            self._log_health(
+                endpoint_key=target_key,
+                status="FAILED",
+                status_code=-1,
+                message=f"Session health probe error: {err}",
+                response_preview="",
+            )
             logging.warning(f"[ReplayExecutor] Session health probe error: {err}")
             return False
 
@@ -190,12 +374,59 @@ class ReplayExecutor:
                 body_text = body_bytes.decode("utf-8", errors="replace")
 
                 if status_code != 200:
+                    # Log failure before raising
+                    self._log_health(
+                        endpoint_key=endpoint_key,
+                        status="FAILED",
+                        status_code=status_code,
+                        message=f"HTTP request failed with status code {status_code}",
+                        response_preview="",
+                    )
                     raise RuntimeError(f"HTTP request failed with status code {status_code}")
 
-                return json.loads(body_text)
+                try:
+                    payload = json.loads(body_text)
+                except json.JSONDecodeError as jde:
+                    # Log non-JSON response failure
+                    self._log_health(
+                        endpoint_key=endpoint_key,
+                        status="FAILED",
+                        status_code=status_code,
+                        message=f"Response payload was not valid JSON: {jde}",
+                        response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
+                    )
+                    raise RuntimeError("Response payload was not valid JSON") from jde
+
+                # Success – log and return
+                self._log_health(
+                    endpoint_key=endpoint_key,
+                    status="SUCCESS",
+                    status_code=200,
+                    message="Replay execution succeeded (HTTP 200 JSON).",
+                    response_preview=self.clamp_preview(payload, max_lines=5, max_chars=500),
+                )
+                return payload
+
         except urllib.error.HTTPError as http_err:
-            raise RuntimeError(f"HTTP error occurred during execution: {http_err.code} {http_err.reason}") from http_err
+            self._log_health(
+                endpoint_key=endpoint_key,
+                status="FAILED",
+                status_code=http_err.code,
+                message=f"HTTP error during execution: {http_err.code} {http_err.reason}",
+                response_preview="",
+            )
+            raise RuntimeError(
+                f"HTTP error occurred during execution: {http_err.code} {http_err.reason}"
+            ) from http_err
+
         except Exception as err:
+            self._log_health(
+                endpoint_key=endpoint_key,
+                status="FAILED",
+                status_code=-1,
+                message=f"Execution error: {err}",
+                response_preview="",
+            )
             raise RuntimeError(f"Execution error for endpoint '{endpoint_key}': {err}") from err
 
     def to_curl(self, endpoint_key: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -245,7 +476,6 @@ class ReplayExecutor:
             result += "\n... [truncated]"
 
         return result
-
 
 if __name__ == "__main__":
     schema_dir = pathlib.Path("./data/schemas")

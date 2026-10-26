@@ -44,6 +44,7 @@ class CDPNetworkInterceptor:
         self._msg_id: int = 0
         self._pending_commands: Dict[int, asyncio.Future[Dict[str, Any]]] = {}
         self._pending_requests: Dict[str, Dict[str, Any]] = {}
+        self._active_web_sockets: Dict[str, Dict[str, Any]] = {}
 
     async def start(self) -> None:
         if self._is_listening:
@@ -174,7 +175,7 @@ class CDPNetworkInterceptor:
         if any(url_lower.endswith(ext) or f"{ext}?" in url_lower for ext in ignored_extensions):
             return False
 
-        if resource_type in ("XHR", "Fetch") or "json" in mime_type.lower():
+        if resource_type in ("XHR", "Fetch", "WebSocket") or "json" in mime_type.lower():
             return True
 
         if not mime_type and not resource_type:
@@ -225,57 +226,47 @@ class CDPNetworkInterceptor:
         elif method == "Network.loadingFailed":
             self._pending_requests.pop(request_id, None)
 
-    async def _process_completed_request(
-        self, request_id: str, req_data: Dict[str, Any]
-    ) -> None:
-        resource_type = req_data.get("resource_type", "")
-        mime_type = req_data.get("mime_type", "").lower()
-        req_url = req_data.get("url", "")
+        elif method == "Network.webSocketCreated":
+            url = params.get("url", "")
+            self._active_web_sockets[request_id] = {
+                "url": url,
+                "headers": {},
+            }
 
-        is_structured_data = (
-            resource_type in ("XHR", "Fetch")
-            or "json" in mime_type
-            or "application/javascript" in mime_type
-        )
+        elif method == "Network.webSocketWillSendHandshakeRequest":
+            request_info = params.get("request", {})
+            if request_id in self._active_web_sockets:
+                self._active_web_sockets[request_id]["headers"] = request_info.get("headers", {})
 
-        body: Optional[str] = None
-        if is_structured_data and self._is_api_candidate(req_url, mime_type, resource_type):
-            try:
-                result = await self._send_command(
-                    "Network.getResponseBody", {"requestId": request_id}
+        elif method in ("Network.webSocketFrameReceived", "Network.webSocketFrameSent"):
+            ws_info = self._active_web_sockets.get(request_id, {"url": "", "headers": {}})
+            frame = params.get("response", {})
+            payload_data = frame.get("payloadData", "")
+            opcode = frame.get("opcode", 1)
+
+            if payload_data and (opcode == 1 or isinstance(payload_data, str)):
+                direction = "WS_RECV" if method == "Network.webSocketFrameReceived" else "WS_SENT"
+                event = NetworkEvent(
+                    request_id=f"{request_id}_{direction}_{params.get('timestamp', time.time())}",
+                    url=ws_info.get("url", ""),
+                    method=direction,
+                    request_headers=ws_info.get("headers", {}),
+                    status_code=101,
+                    mime_type="application/json" if payload_data.strip().startswith(("{", "[")) else "text/plain",
+                    resource_type="WebSocket",
+                    response_body=payload_data,
+                    timestamp=params.get("timestamp", time.time()),
                 )
-                raw_body = result.get("body", "")
-                if result.get("base64Encoded", False):
-                    body = base64.b64decode(raw_body).decode("utf-8", errors="replace")
-                else:
-                    body = raw_body
-            except Exception as err:
-                logging.debug(f"[CDP] Could not get response body for {request_id}: {err}")
-
-        event = NetworkEvent(
-            request_id=request_id,
-            url=req_url,
-            method=req_data.get("method", "GET"),
-            request_headers=req_data.get("request_headers", {}),
-            status_code=req_data.get("status_code", 0),
-            mime_type=mime_type,
-            resource_type=resource_type,
-            response_body=body,
-        )
-
-        self.captured_events.append(event)
-        self._pending_requests.pop(request_id, None)
-
-        if self._is_api_candidate(req_url, mime_type, resource_type) and body is not None:
-            print(
-                f"[>>] Intercepted API: {event.method} {event.url} ({event.status_code} / {event.mime_type})"
-            )
-
-        if self.on_event_callback:
-            try:
-                self.on_event_callback(event)
-            except Exception as callback_err:
-                logging.error(f"[CDP] Error in event callback: {callback_err}")
+                self.captured_events.append(event)
+                if self._is_api_candidate(event.url, event.mime_type, event.resource_type):
+                    print(
+                        f"[>>] Intercepted WS Frame ({direction}): {event.url} ({len(payload_data)} bytes)"
+                    )
+                if self.on_event_callback:
+                    try:
+                        self.on_event_callback(event)
+                    except Exception as callback_err:
+                        logging.error(f"[CDP] Error in event callback: {callback_err}")
 
 
 if __name__ == "__main__":

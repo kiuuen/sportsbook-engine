@@ -329,6 +329,7 @@ class HeuristicClassifier:
         time_span_seconds: float,
         pos_score: float,
         significant_arrays_count: int,
+        is_websocket: bool = False,
     ) -> Tuple[str, str]:
         has_path_params = bool(re.search(r"\{[^}]+\}", url_template))
 
@@ -341,7 +342,7 @@ class HeuristicClassifier:
             role = "catalog_root"
 
         # Volatility tier classification logic
-        if (call_count >= 2 and time_span_seconds > 0.0 and (time_span_seconds / call_count) <= 5.0) or role == "odds_detail":
+        if is_websocket or (call_count >= 2 and time_span_seconds > 0.0 and (time_span_seconds / call_count) <= 5.0) or role == "odds_detail":
             volatility = "realtime"
         elif role == "fixtures_list" or has_path_params:
             volatility = "semi_volatile"
@@ -360,7 +361,17 @@ class HeuristicClassifier:
     ) -> ClassificationResult:
         url_template = RouteTemplateDeducer.deduce_template(url)
 
-        if not payload_str or not payload_str.strip():
+        is_websocket = (
+            sample_event is not None
+            and (sample_event.resource_type == "WebSocket" or sample_event.method in ("WS_RECV", "WS_SENT"))
+        )
+
+        clean_payload = payload_str.strip()
+        json_match = re.search(r"(\[.*\]|\{.*\})", clean_payload, re.DOTALL)
+        if json_match:
+            clean_payload = json_match.group(1)
+
+        if not clean_payload:
             return ClassificationResult(
                 url=url,
                 url_template=url_template,
@@ -374,7 +385,7 @@ class HeuristicClassifier:
             )
 
         try:
-            data = json.loads(payload_str)
+            data = json.loads(clean_payload)
         except Exception:
             return ClassificationResult(
                 url=url,
@@ -502,6 +513,7 @@ class HeuristicClassifier:
             time_span_seconds=time_span_seconds,
             pos_score=pos_score,
             significant_arrays_count=len(significant_arrays),
+            is_websocket=is_websocket,
         )
 
         total_pos_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.POSITIVE_CATEGORIES)

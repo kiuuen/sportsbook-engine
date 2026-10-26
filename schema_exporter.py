@@ -118,6 +118,9 @@ class SchemaExporter:
         if not event or not event.url:
             return False
 
+        if event.resource_type == "WebSocket" or event.method in ("WS_RECV", "WS_SENT"):
+            return bool(event.response_body and event.response_body.strip())
+
         clean_headers: Dict[str, str] = {
             k: v for k, v in event.request_headers.items()
             if not k.startswith(":") and k.lower() not in ("host", "content-length")
@@ -183,13 +186,21 @@ class SchemaExporter:
             "match_detail_metrics": None,
         }
 
+        taxonomy_keywords = ("catalog", "sports", "categories", "taxonomy", "menu", "tree", "navigation", "hierarchy", "structure")
+
         for ep_key, ep_info in endpoints.items():
             role = ep_info.get("role", "")
             volatility = ep_info.get("volatility", "")
             template_url = ep_info.get("template_url", "").lower()
             dynamic_params = ep_info.get("dynamic_parameters", [])
+            sample_resp = ep_info.get("sample_response", {})
 
-            if role == "catalog_root" and pipeline["sports_catalog"] is None:
+            has_taxonomy_url = any(kw in template_url for kw in taxonomy_keywords)
+            has_taxonomy_resp = isinstance(sample_resp, dict) and any(
+                kw in str(key).lower() for key in sample_resp.keys() for kw in taxonomy_keywords
+            )
+
+            if pipeline["sports_catalog"] is None and (role == "catalog_root" or has_taxonomy_url or has_taxonomy_resp):
                 pipeline["sports_catalog"] = ep_key
 
             is_live_signal = "live" in template_url or "inplay" in template_url or volatility == "realtime"
@@ -225,6 +236,7 @@ class SchemaExporter:
                 session_cookies.update(extracted_cookies)
 
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
+        streaming_endpoints_dict: Dict[str, Dict[str, Any]] = {}
         auxiliary_endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
         for res in classified_results:
@@ -250,13 +262,17 @@ class SchemaExporter:
             score: float = getattr(res, "score", 0.0)
             role: str = getattr(res, "role", "catalog_root")
             volatility: str = getattr(res, "volatility", "static")
+            is_websocket: bool = (
+                sample_ev.resource_type == "WebSocket"
+                or sample_ev.method in ("WS_RECV", "WS_SENT")
+            )
 
             # Core requirements filter vs auxiliary capture
             if not is_auxiliary:
                 if not is_viable or score < 45.0:
                     continue
                 is_detailed_or_realtime = (role == "odds_detail" or volatility == "realtime")
-                if is_detailed_or_realtime and odds_count < 5:
+                if is_detailed_or_realtime and odds_count < 5 and not is_websocket:
                     continue
                 if not self._verify_replay_candidate(sample_ev):
                     continue
@@ -269,7 +285,7 @@ class SchemaExporter:
 
             template_url = getattr(res, "url_template", getattr(res, "url", ""))
             dynamic_params = sorted(list(set(re.findall(r"\{([^}]+)\}", template_url))))
-            curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers)
+            curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers) if not is_websocket else ""
 
             sanitized_payload: Any = {}
             try:
@@ -283,25 +299,29 @@ class SchemaExporter:
             endpoint_data = {
                 "role": role,
                 "volatility": volatility,
+                "protocol": "websocket" if is_websocket else ("https" if getattr(sample_ev, "url", "").startswith("https") else "http"),
                 "method": method,
                 "template_url": template_url,
                 "dynamic_parameters": dynamic_params,
                 "provides_parameters": produced_params,
                 "curl_command": curl_cmd,
+                "handshake_headers": essential_req_headers if is_websocket else {},
                 "sample_response": sanitized_payload,
             }
             endpoint_key = f"{method}_{template_url}"
 
-            if is_auxiliary:
+            if is_websocket:
+                streaming_endpoints_dict[endpoint_key] = endpoint_data
+            elif is_auxiliary:
                 auxiliary_endpoints_dict[endpoint_key] = endpoint_data
             else:
                 endpoints_dict[endpoint_key] = endpoint_data
 
-        if not endpoints_dict and not auxiliary_endpoints_dict:
+        if not endpoints_dict and not streaming_endpoints_dict and not auxiliary_endpoints_dict:
             print("[!] Schema export aborted: No valid APIs found for this target.")
             return None
 
-        provider_family = self._infer_provider_family(target_domain, endpoints_dict or auxiliary_endpoints_dict)
+        provider_family = self._infer_provider_family(target_domain, endpoints_dict or streaming_endpoints_dict or auxiliary_endpoints_dict)
         canonical_pipeline = self._build_canonical_pipeline(endpoints_dict)
 
         producers_map: Dict[str, List[str]] = {}
@@ -327,6 +347,7 @@ class SchemaExporter:
                 "consumers": consumers_map,
             },
             "endpoints": endpoints_dict,
+            "streaming_endpoints": streaming_endpoints_dict,
             "auxiliary_endpoints": auxiliary_endpoints_dict,
         }
 

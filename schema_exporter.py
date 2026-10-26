@@ -143,6 +143,18 @@ class SchemaExporter:
             pass
         return False
 
+    @staticmethod
+    def _infer_provider_family(target_domain: str, endpoints: Dict[str, Any]) -> str:
+        clean_domain = target_domain.replace(".", "_").replace("-", "_")
+        structural_keys: Set[str] = set()
+        for ep_info in endpoints.values():
+            sample_resp = ep_info.get("sample_response", {})
+            if isinstance(sample_resp, dict):
+                structural_keys.update(list(sample_resp.keys())[:5])
+
+        signature_hash = sum(ord(c) for c in "".join(sorted(structural_keys))) % 10000
+        return f"provider_{clean_domain}_{signature_hash:04d}"
+
     def export_schema(
         self,
         target_url: str,
@@ -163,16 +175,9 @@ class SchemaExporter:
                 session_cookies.update(extracted_cookies)
 
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
+        auxiliary_endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
         for res in classified_results:
-            # Enforce Composite Heuristic Validation Guard (multi-factor confidence)
-            is_viable: bool = getattr(res, "is_viable", False)
-            odds_count: int = getattr(res, "odds_count", 0)
-            score: float = getattr(res, "score", 0.0)
-
-            if not is_viable or odds_count < 5 or score < 45.0:
-                continue
-
             sample_ev: Optional[NetworkEvent] = getattr(res, "sample_event", None)
             if not sample_ev:
                 continue
@@ -181,7 +186,6 @@ class SchemaExporter:
             if not raw_body:
                 continue
 
-            # Strict Structured JSON Filter
             try:
                 parsed_payload: Any = json.loads(raw_body)
             except Exception:
@@ -190,45 +194,31 @@ class SchemaExporter:
             if not isinstance(parsed_payload, (dict, list)):
                 continue
 
-            # Replay Probe Gate: Verify endpoint reaches valid HTTP 200 JSON live response
-            if not self._verify_replay_candidate(sample_ev):
-                continue
+            is_auxiliary: bool = getattr(res, "is_auxiliary_widget", False)
+            is_viable: bool = getattr(res, "is_viable", False)
+            odds_count: int = getattr(res, "odds_count", 0)
+            score: float = getattr(res, "score", 0.0)
+
+            # Core requirements filter vs auxiliary capture
+            if not is_auxiliary:
+                if not is_viable or odds_count < 5 or score < 45.0:
+                    continue
+                if not self._verify_replay_candidate(sample_ev):
+                    continue
 
             method = sample_ev.method if sample_ev.method else "GET"
             req_headers = sample_ev.request_headers if sample_ev.request_headers else session_headers
-
             essential_req_headers = self._extract_essential_headers(req_headers)
             if not essential_req_headers:
                 essential_req_headers = session_headers
 
             template_url = getattr(res, "url_template", getattr(res, "url", ""))
             dynamic_params = sorted(list(set(re.findall(r"\{([^}]+)\}", template_url))))
-
             curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers)
 
-            # Lightweight Structural Summary for sample_response
             sanitized_payload: Any = {}
             try:
                 sanitized_payload = self._summarize_payload(parsed_payload)
-                preview_str = json.dumps(sanitized_payload, indent=2)
-
-                # Cap preview at max 15 lines or 1 KB (1024 bytes)
-                if len(preview_str.encode("utf-8")) > 1024 or len(preview_str.splitlines()) > 15:
-                    if isinstance(parsed_payload, dict):
-                        sanitized_payload = {
-                            "top_level_keys": list(parsed_payload.keys())[:10],
-                            "_type": "dict_summary",
-                        }
-                    elif isinstance(parsed_payload, list):
-                        sanitized_payload = {
-                            "item_count": len(parsed_payload),
-                            "sample_item_keys": (
-                                list(parsed_payload[0].keys())[:10]
-                                if parsed_payload and isinstance(parsed_payload[0], dict)
-                                else []
-                            ),
-                            "_type": "list_summary",
-                        }
             except Exception as trunc_err:
                 logging.warning(f"Payload summarization error: {trunc_err}")
                 sanitized_payload = {"error": "payload_summarization_failed"}
@@ -248,13 +238,18 @@ class SchemaExporter:
                 "sample_response": sanitized_payload,
             }
             endpoint_key = f"{method}_{template_url}"
-            endpoints_dict[endpoint_key] = endpoint_data
 
-        if not endpoints_dict:
-            print("[!] Schema export aborted: No verified sportsbook APIs found for this target.")
+            if is_auxiliary:
+                auxiliary_endpoints_dict[endpoint_key] = endpoint_data
+            else:
+                endpoints_dict[endpoint_key] = endpoint_data
+
+        if not endpoints_dict and not auxiliary_endpoints_dict:
+            print("[!] Schema export aborted: No valid APIs found for this target.")
             return None
 
-        # Build dynamic relational dependency graph
+        provider_family = self._infer_provider_family(target_domain, endpoints_dict or auxiliary_endpoints_dict)
+
         producers_map: Dict[str, List[str]] = {}
         consumers_map: Dict[str, List[str]] = {}
 
@@ -266,6 +261,7 @@ class SchemaExporter:
 
         schema_payload = {
             "target_domain": target_domain,
+            "provider_family": provider_family,
             "discovered_at": timestamp,
             "session": {
                 "essential_headers": session_headers,
@@ -276,6 +272,7 @@ class SchemaExporter:
                 "consumers": consumers_map,
             },
             "endpoints": endpoints_dict,
+            "auxiliary_endpoints": auxiliary_endpoints_dict,
         }
 
         output_file = self.output_dir / f"{target_domain}.json"

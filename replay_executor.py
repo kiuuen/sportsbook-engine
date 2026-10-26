@@ -93,10 +93,17 @@ class ReplayExecutor:
         if not missing_params:
             return resolved
 
-        # Identify parent producer endpoints (preferring catalog_root or fixtures_list)
+        # Identify parent producer endpoints (preferring producers mapped in dependency_graph, then catalog_root/fixtures_list)
         parent_candidates: List[str] = []
+        producers_map = self.dependency_graph.get("producers", {})
+        for param in missing_params:
+            if param in producers_map:
+                for producer_key in producers_map[param]:
+                    if producer_key not in parent_candidates and producer_key != endpoint_key:
+                        parent_candidates.append(producer_key)
+
         for parent_key, parent_info in self.endpoints.items():
-            if parent_key == endpoint_key:
+            if parent_key == endpoint_key or parent_key in parent_candidates:
                 continue
             role = parent_info.get("role", "")
             if role in ("catalog_root", "fixtures_list"):
@@ -133,10 +140,11 @@ class ReplayExecutor:
             logging.warning(f"[ReplayExecutor] Endpoint key '{target_key}' not found in schema.")
             return False
 
+        resolved_params = self._resolve_dynamic_params(target_key)
         template_url = endpoint_info.get("template_url", "")
         method = endpoint_info.get("method", "GET")
 
-        clean_url = self.hydrate_url(template_url)
+        clean_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
 
         try:

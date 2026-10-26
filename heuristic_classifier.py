@@ -34,6 +34,7 @@ class ClassificationResult:
     role: str = "catalog_root"
     volatility: str = "static"
     produced_params: List[str] = field(default_factory=list)
+    is_auxiliary_widget: bool = False
 
 
 class LexiconManager:
@@ -321,7 +322,7 @@ class HeuristicClassifier:
         significant_arrays_count: int,
     ) -> Tuple[str, str]:
         has_path_params = bool(re.search(r"\{[^}]+\}", url_template))
-        
+
         # Role classification logic
         if total_odds_count >= 10 or (has_path_params and total_odds_count >= 3):
             role = "odds_detail"
@@ -530,6 +531,13 @@ class HeuristicClassifier:
             significant_arrays_count=len(significant_arrays),
         )
 
+        # Determine auxiliary widget tier dynamically based on content signals
+        is_auxiliary_widget = (
+            total_odds_count < 2
+            and len(core_betting_matched_terms) == 0
+            and (noise_score > pos_score or not is_composite_confident)
+        )
+
         return ClassificationResult(
             url=url,
             url_template=url_template,
@@ -547,6 +555,7 @@ class HeuristicClassifier:
             role=role,
             volatility=volatility,
             produced_params=produced_params,
+            is_auxiliary_widget=is_auxiliary_widget,
         )
 
 

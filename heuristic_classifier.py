@@ -166,8 +166,24 @@ class HeuristicClassifier:
         "provider_identifiers_and_abbreviations": 12.0,
     }
 
-    def __init__(self, lexicon_path: str = "sportsbook_lexicon.json") -> None:
+    def __init__(
+        self,
+        lexicon_path: str = "sportsbook_lexicon.json",
+        filters_path: str = "network_filters.json",
+    ) -> None:
         self.lexicon_mgr: LexiconManager = LexiconManager(lexicon_path)
+        self.filters_path: pathlib.Path = pathlib.Path(filters_path)
+        self.ignored_url_keywords: List[str] = self._load_ignored_url_keywords()
+
+    def _load_ignored_url_keywords(self) -> List[str]:
+        if self.filters_path.exists():
+            try:
+                with open(self.filters_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return [kw.lower() for kw in data.get("ignored_url_keywords", [])]
+            except Exception as e:
+                logging.warning(f"Could not load {self.filters_path}: {e}")
+        return []
 
     def _inspect_node(
         self,
@@ -334,8 +350,7 @@ class HeuristicClassifier:
         temporal_polling_bonus = 10.0 if (call_count >= 2 and time_span_seconds >= 1.0) else 0.0
 
         url_lower = url.lower()
-        ui_noise_keywords = ("locales/", "i18n/", "theme.json", "layout.json")
-        url_noise_penalty = 60.0 if any(kw in url_lower for kw in ui_noise_keywords) else 0.0
+        url_noise_penalty = 60.0 if any(kw in url_lower for kw in self.ignored_url_keywords) else 0.0
 
         raw_score = (
             pos_score

@@ -1,0 +1,178 @@
+import json
+import logging
+import pathlib
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, Optional, Union
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+class ReplayExecutor:
+
+    def __init__(self, schema_source: Union[str, pathlib.Path]) -> None:
+        self.schema_path: pathlib.Path = self._resolve_schema_path(schema_source)
+        self.schema_data: Dict[str, Any] = self._load_schema()
+        self.target_domain: str = self.schema_data.get("target_domain", "unknown_target")
+        self.session_headers: Dict[str, str] = self.schema_data.get("session", {}).get("essential_headers", {})
+        self.session_cookies: Dict[str, str] = self.schema_data.get("session", {}).get("cookies", {})
+        self.endpoints: Dict[str, Dict[str, Any]] = self.schema_data.get("endpoints", {})
+
+    @staticmethod
+    def _resolve_schema_path(source: Union[str, pathlib.Path]) -> pathlib.Path:
+        path = pathlib.Path(source)
+        if path.is_file():
+            return path
+
+        if not str(source).endswith(".json"):
+            candidate = pathlib.Path("./data/schemas") / f"{source}.json"
+            if candidate.is_file():
+                return candidate
+
+        candidate_default = pathlib.Path("./data/schemas") / path.name
+        if candidate_default.is_file():
+            return candidate_default
+
+        raise FileNotFoundError(f"Schema file not found for source: {source}")
+
+    def _load_schema(self) -> Dict[str, Any]:
+        try:
+            with open(self.schema_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as err:
+            raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
+
+    def _build_request_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {k: v for k, v in self.session_headers.items() if not k.startswith(":")}
+        if self.session_cookies:
+            cookie_str = "; ".join(f"{k}={v}" for k, v in self.session_cookies.items())
+            headers["Cookie"] = cookie_str
+        return headers
+
+    def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:
+        if not params:
+            return template_url
+
+        hydrated = template_url
+        for key, val in params.items():
+            placeholder = f"{{{key}}}"
+            if placeholder in hydrated:
+                hydrated = hydrated.replace(placeholder, str(val))
+
+        return hydrated
+
+    def check_session_health(self, endpoint_key: Optional[str] = None) -> bool:
+        if not self.endpoints:
+            logging.warning("[ReplayExecutor] No endpoints found in schema.")
+            return False
+
+        target_key = endpoint_key or next(iter(self.endpoints.keys()))
+        endpoint_info = self.endpoints.get(target_key)
+        if not endpoint_info:
+            logging.warning(f"[ReplayExecutor] Endpoint key '{target_key}' not found in schema.")
+            return False
+
+        template_url = endpoint_info.get("template_url", "")
+        method = endpoint_info.get("method", "GET")
+
+        clean_url = re.sub(r"\{[^}]+\}", "1", template_url)
+        headers = self._build_request_headers()
+
+        try:
+            req = urllib.request.Request(url=clean_url, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=10.0) as response:
+                if response.status == 200:
+                    body_text = response.read().decode("utf-8", errors="replace")
+                    try:
+                        json.loads(body_text)
+                        logging.info(f"[ReplayExecutor] Session health probe succeeded (HTTP 200 JSON) on '{target_key}'.")
+                        return True
+                    except json.JSONDecodeError:
+                        logging.warning("[ReplayExecutor] Health probe returned HTTP 200, but payload was not valid JSON.")
+                        return False
+                else:
+                    logging.warning(f"[ReplayExecutor] Health probe returned non-200 status: {response.status}")
+                    return False
+        except urllib.error.HTTPError as http_err:
+            logging.warning(f"[ReplayExecutor] Session health check failed with HTTP status {http_err.code}.")
+            return False
+        except Exception as err:
+            logging.warning(f"[ReplayExecutor] Session health probe error: {err}")
+            return False
+
+    def execute(
+        self, endpoint_key: str, params: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        endpoint_info = self.endpoints.get(endpoint_key)
+        if not endpoint_info:
+            raise KeyError(f"Endpoint '{endpoint_key}' not present in loaded schema.")
+
+        template_url = endpoint_info.get("template_url", "")
+        method = endpoint_info.get("method", "GET")
+        hydrated_url = self.hydrate_url(template_url, params)
+        headers = self._build_request_headers()
+
+        req = urllib.request.Request(url=hydrated_url, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=12.0) as response:
+                status_code = response.status
+                body_bytes = response.read()
+                body_text = body_bytes.decode("utf-8", errors="replace")
+
+                if status_code != 200:
+                    raise RuntimeError(f"HTTP request failed with status code {status_code}")
+
+                return json.loads(body_text)
+        except urllib.error.HTTPError as http_err:
+            raise RuntimeError(f"HTTP error occurred during execution: {http_err.code} {http_err.reason}") from http_err
+        except Exception as err:
+            raise RuntimeError(f"Execution error for endpoint '{endpoint_key}': {err}") from err
+
+    def to_curl(self, endpoint_key: str, params: Optional[Dict[str, Any]] = None) -> str:
+        endpoint_info = self.endpoints.get(endpoint_key)
+        if not endpoint_info:
+            raise KeyError(f"Endpoint '{endpoint_key}' not present in loaded schema.")
+
+        template_url = endpoint_info.get("template_url", "")
+        method = endpoint_info.get("method", "GET")
+        hydrated_url = self.hydrate_url(template_url, params)
+        headers = self._build_request_headers()
+
+        header_flags = " ".join([f'-H "{k}: {v}"' for k, v in headers.items()])
+        if header_flags:
+            return f'curl -X {method} "{hydrated_url}" {header_flags}'
+        return f'curl -X {method} "{hydrated_url}"'
+
+
+if __name__ == "__main__":
+    schema_dir = pathlib.Path("./data/schemas")
+    schema_files = list(schema_dir.glob("*.json")) if schema_dir.exists() else []
+
+    if not schema_files:
+        print("[-] No schema JSON files found in ./data/schemas/. Please run discovery first.")
+    else:
+        selected_schema = schema_files[0]
+        print(f"[*] Loading schema blueprint: {selected_schema.name}")
+        executor = ReplayExecutor(selected_schema)
+
+        is_healthy = executor.check_session_health()
+        print(f"[+] Session Health Status: {'ACTIVE (200 OK)' if is_healthy else 'EXPIRED / INVALID'}")
+
+        if executor.endpoints:
+            first_endpoint_key = next(iter(executor.endpoints.keys()))
+            curl_cmd = executor.to_curl(first_endpoint_key)
+            print(f"\n[*] Generated cURL command for '{first_endpoint_key}':")
+            print(f"    {curl_cmd}\n")
+
+            if is_healthy:
+                print(f"[*] Executing live fetch for endpoint '{first_endpoint_key}'...")
+                try:
+                    response_data = executor.execute(first_endpoint_key)
+                    json_str = json.dumps(response_data, indent=2)
+                    lines = json_str.splitlines()
+                    preview = "\n".join(lines[:10])
+                    print(f"[+] Response Preview (First 10 lines):\n{preview}")
+                except Exception as ex:
+                    print(f"[-] Execution failed: {ex}")

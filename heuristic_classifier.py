@@ -173,7 +173,7 @@ class HeuristicClassifier:
     }
 
     STYLE_KEY_PATTERN: re.Pattern = re.compile(
-        r".*(color|margin|padding|border|radius|shadow|font|typography|palette|theme|style|dimension|flex|grid|align|justify).*",
+        r".*(color|margin[-_]?(?:top|bottom|left|right)|padding|border|radius|shadow|font|typography|palette|theme|style|dimension|flex|grid|align|justify).*",
         re.IGNORECASE,
     )
     COLOR_MODEL_PATTERN: re.Pattern = re.compile(
@@ -224,18 +224,6 @@ class HeuristicClassifier:
 
         return matched_pos_cats, matched_noise_cats, matched_terms
 
-    def _collect_subtree_positive_categories(self, node: Any) -> Set[str]:
-        pos_cats: Set[str] = set()
-        if isinstance(node, dict):
-            for k, v in node.items():
-                k_pos, _, _ = self._match_key_categories(str(k).lower())
-                pos_cats.update(k_pos)
-                pos_cats.update(self._collect_subtree_positive_categories(v))
-        elif isinstance(node, list):
-            for item in node:
-                pos_cats.update(self._collect_subtree_positive_categories(item))
-        return pos_cats
-
     def _traverse_relational_structures(
         self,
         node: Any,
@@ -259,14 +247,13 @@ class HeuristicClassifier:
                 local_pos_in_keys.update(k_pos)
 
             current_pos_categories = ancestor_positive_categories | local_pos_in_keys
-            subtree_pos_categories = current_pos_categories | self._collect_subtree_positive_categories(node)
 
             for k, v in node.items():
                 k_str = str(k).lower()
                 self._traverse_relational_structures(
                     v,
                     is_repetitive_context=is_repetitive_context,
-                    ancestor_positive_categories=subtree_pos_categories,
+                    ancestor_positive_categories=current_pos_categories,
                     keys_found=keys_found,
                     structural_odds=structural_odds,
                     array_lengths=array_lengths,
@@ -508,12 +495,8 @@ class HeuristicClassifier:
         final_score = max(0.0, min(100.0, raw_score))
 
         # Enforce strict zero-scoring for noise categories or non-target entertainment catalogs
-        entertainment_keywords = {
-            "casino", "slot", "slots", "poker", "bingo", "lottery",
-            "cashier", "deposit", "withdraw", "promo", "promotions", "avatar"
-        }
-        has_entertainment_signals = any(kw in url_lower for kw in entertainment_keywords) or any(
-            any(kw in key for kw in entertainment_keywords) for key in keys_found
+        has_entertainment_signals = any(term in url_lower for term in self.lexicon_mgr.all_noise_terms) or any(
+            any(term in key for term in self.lexicon_mgr.all_noise_terms) for key in keys_found
         )
 
         total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)

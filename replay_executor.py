@@ -5,7 +5,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 

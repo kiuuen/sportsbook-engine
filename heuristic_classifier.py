@@ -31,6 +31,9 @@ class ClassificationResult:
     time_span_seconds: float = 0.0
     sample_event: Optional[NetworkEvent] = None
     is_viable: bool = False
+    role: str = "catalog_root"
+    volatility: str = "static"
+    produced_params: List[str] = field(default_factory=list)
 
 
 class LexiconManager:
@@ -297,6 +300,46 @@ class HeuristicClassifier:
     def _is_american_odds(self, val: float) -> bool:
         return (val <= -100 or val >= 100) and val == math.floor(val) and abs(val) <= 50000
 
+    def _extract_produced_identifiers(self, keys_found: List[str]) -> List[str]:
+        identifier_keys: Set[str] = set()
+        id_patterns = (r".*_?id$", r".*_?uuid$", r".*_?code$", r".*_?key$", r".*_?slug$")
+        for key in keys_found:
+            k_clean = key.strip().lower()
+            if self.lexicon_mgr.is_generic_or_blacklisted(k_clean):
+                continue
+            if any(re.match(pattern, k_clean) for pattern in id_patterns):
+                identifier_keys.add(k_clean)
+        return sorted(list(identifier_keys))
+
+    def _deduce_role_and_volatility(
+        self,
+        url_template: str,
+        total_odds_count: int,
+        call_count: int,
+        time_span_seconds: float,
+        pos_score: float,
+        significant_arrays_count: int,
+    ) -> Tuple[str, str]:
+        has_path_params = bool(re.search(r"\{[^}]+\}", url_template))
+        
+        # Role classification logic
+        if total_odds_count >= 10 or (has_path_params and total_odds_count >= 3):
+            role = "odds_detail"
+        elif significant_arrays_count >= 1 and (total_odds_count >= 1 or pos_score >= 20.0):
+            role = "fixtures_list"
+        else:
+            role = "catalog_root"
+
+        # Volatility tier classification logic
+        if (call_count >= 2 and time_span_seconds > 0.0 and (time_span_seconds / call_count) <= 5.0) or role == "odds_detail":
+            volatility = "realtime"
+        elif role == "fixtures_list" or has_path_params:
+            volatility = "semi_volatile"
+        else:
+            volatility = "static"
+
+        return role, volatility
+
     def score_payload(
         self,
         url: str,
@@ -477,6 +520,16 @@ class HeuristicClassifier:
             cat: float(count) for cat, count in category_matches.items() if count > 0
         }
 
+        produced_params = self._extract_produced_identifiers(keys_found)
+        role, volatility = self._deduce_role_and_volatility(
+            url_template=url_template,
+            total_odds_count=total_odds_count,
+            call_count=call_count,
+            time_span_seconds=time_span_seconds,
+            pos_score=pos_score,
+            significant_arrays_count=len(significant_arrays),
+        )
+
         return ClassificationResult(
             url=url,
             url_template=url_template,
@@ -491,6 +544,9 @@ class HeuristicClassifier:
             time_span_seconds=round(time_span_seconds, 2),
             sample_event=sample_event,
             is_viable=is_composite_confident,
+            role=role,
+            volatility=volatility,
+            produced_params=produced_params,
         )
 
 

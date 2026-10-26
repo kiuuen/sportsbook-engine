@@ -233,10 +233,17 @@ class SchemaExporter:
                 logging.warning(f"Payload summarization error: {trunc_err}")
                 sanitized_payload = {"error": "payload_summarization_failed"}
 
+            role: str = getattr(res, "role", "catalog_root")
+            volatility: str = getattr(res, "volatility", "static")
+            produced_params: List[str] = getattr(res, "produced_params", [])
+
             endpoint_data = {
+                "role": role,
+                "volatility": volatility,
                 "method": method,
                 "template_url": template_url,
                 "dynamic_parameters": dynamic_params,
+                "provides_parameters": produced_params,
                 "curl_command": curl_cmd,
                 "sample_response": sanitized_payload,
             }
@@ -247,12 +254,26 @@ class SchemaExporter:
             print("[!] Schema export aborted: No verified sportsbook APIs found for this target.")
             return None
 
+        # Build dynamic relational dependency graph
+        producers_map: Dict[str, List[str]] = {}
+        consumers_map: Dict[str, List[str]] = {}
+
+        for ep_key, ep_val in endpoints_dict.items():
+            for param in ep_val.get("provides_parameters", []):
+                producers_map.setdefault(param, []).append(ep_key)
+            if ep_val.get("dynamic_parameters"):
+                consumers_map[ep_key] = ep_val["dynamic_parameters"]
+
         schema_payload = {
             "target_domain": target_domain,
             "discovered_at": timestamp,
             "session": {
                 "essential_headers": session_headers,
                 "cookies": session_cookies,
+            },
+            "dependency_graph": {
+                "producers": producers_map,
+                "consumers": consumers_map,
             },
             "endpoints": endpoints_dict,
         }

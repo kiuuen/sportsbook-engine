@@ -19,6 +19,7 @@ class ReplayExecutor:
         self.session_headers: Dict[str, str] = self.schema_data.get("session", {}).get("essential_headers", {})
         self.session_cookies: Dict[str, str] = self.schema_data.get("session", {}).get("cookies", {})
         self.endpoints: Dict[str, Dict[str, Any]] = self.schema_data.get("endpoints", {})
+        self.dependency_graph: Dict[str, Any] = self.schema_data.get("dependency_graph", {})
 
     @staticmethod
     def _resolve_schema_path(source: Union[str, pathlib.Path]) -> pathlib.Path:
@@ -69,6 +70,58 @@ class ReplayExecutor:
 
         return re.sub(r"\{([^}]+)\}", _fallback_replacer, hydrated)
 
+    def _harvest_identifiers(self, node: Any, target_params: Set[str], harvested: Dict[str, List[Any]]) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                k_lower = str(k).lower()
+                for param in target_params:
+                    param_clean = param.lower().replace("{", "").replace("}", "")
+                    if param_clean in k_lower or k_lower in param_clean or k_lower.endswith("id"):
+                        if isinstance(v, (str, int)) and not isinstance(v, bool):
+                            harvested.setdefault(param, []).append(v)
+                self._harvest_identifiers(v, target_params, harvested)
+        elif isinstance(node, list):
+            for item in node:
+                self._harvest_identifiers(item, target_params, harvested)
+
+    def _resolve_dynamic_params(self, endpoint_key: str, provided_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        endpoint_info = self.endpoints.get(endpoint_key, {})
+        required_params = endpoint_info.get("dynamic_parameters", [])
+        resolved: Dict[str, Any] = dict(provided_params) if provided_params else {}
+
+        missing_params = [p for p in required_params if p not in resolved]
+        if not missing_params:
+            return resolved
+
+        # Identify parent producer endpoints (preferring catalog_root or fixtures_list)
+        parent_candidates: List[str] = []
+        for parent_key, parent_info in self.endpoints.items():
+            if parent_key == endpoint_key:
+                continue
+            role = parent_info.get("role", "")
+            if role in ("catalog_root", "fixtures_list"):
+                parent_candidates.append(parent_key)
+
+        for parent_key in parent_candidates:
+            try:
+                logging.info(f"[ReplayExecutor] Chaining execution: resolving {missing_params} via parent '{parent_key}'...")
+                parent_response = self.execute(parent_key)
+                harvested: Dict[str, List[Any]] = {}
+                self._harvest_identifiers(parent_response, set(missing_params), harvested)
+
+                for param in list(missing_params):
+                    values = harvested.get(param, [])
+                    if values:
+                        resolved[param] = values[0]
+                        missing_params.remove(param)
+
+                if not missing_params:
+                    break
+            except Exception as err:
+                logging.warning(f"[ReplayExecutor] Failed harvesting from parent '{parent_key}': {err}")
+
+        return resolved
+
     def check_session_health(self, endpoint_key: Optional[str] = None) -> bool:
         if not self.endpoints:
             logging.warning("[ReplayExecutor] No endpoints found in schema.")
@@ -115,9 +168,10 @@ class ReplayExecutor:
         if not endpoint_info:
             raise KeyError(f"Endpoint '{endpoint_key}' not present in loaded schema.")
 
+        resolved_params = self._resolve_dynamic_params(endpoint_key, params)
         template_url = endpoint_info.get("template_url", "")
         method = endpoint_info.get("method", "GET")
-        hydrated_url = self.hydrate_url(template_url, params)
+        hydrated_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
 
         req = urllib.request.Request(url=hydrated_url, headers=headers, method=method)
@@ -141,9 +195,10 @@ class ReplayExecutor:
         if not endpoint_info:
             raise KeyError(f"Endpoint '{endpoint_key}' not present in loaded schema.")
 
+        resolved_params = self._resolve_dynamic_params(endpoint_key, params)
         template_url = endpoint_info.get("template_url", "")
         method = endpoint_info.get("method", "GET")
-        hydrated_url = self.hydrate_url(template_url, params)
+        hydrated_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
 
         header_flags = " ".join([

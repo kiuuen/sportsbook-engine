@@ -1,3 +1,56 @@
-.aider*
+# ============================================
+# Environment & Secrets
+# ============================================
 .env
-.md
+.env.*
+*.env
+
+# ============================================
+# Databases & SQLite WAL/SHM (Bifrost & Engine)
+# ============================================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ============================================
+# Aider & LLM Artifacts
+# ============================================
+.aider*
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v*
+repomix-output.xml
+
+# ============================================
+# Python Caches & Virtualenvs
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# ============================================
+# C++ Binaries & Visual Studio Artifacts
+# ============================================
+exercises/output/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+
+# ============================================
+# Generated Schemas (Outputs)
+# ============================================
+# Ignora los JSON generados del scraping, pero conserva los de config
+data/schemas/*.json
+
+# ============================================
+# Markdown Chat Logs / Temporary
+# ============================================
+*.chat.history.md
+*.prompt.md

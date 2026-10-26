@@ -52,16 +52,22 @@ class ReplayExecutor:
         return headers
 
     def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:
-        if not params:
-            return template_url
-
         hydrated = template_url
-        for key, val in params.items():
-            placeholder = f"{{{key}}}"
-            if placeholder in hydrated:
-                hydrated = hydrated.replace(placeholder, str(val))
+        if params:
+            for key, val in params.items():
+                placeholder = f"{{{key}}}"
+                if placeholder in hydrated:
+                    hydrated = hydrated.replace(placeholder, str(val))
 
-        return hydrated
+        def _fallback_replacer(match: re.Match) -> str:
+            param_name = match.group(1).lower()
+            if param_name == "uuid":
+                return "00000000-0000-0000-0000-000000000000"
+            if "timestamp" in param_name or "time" in param_name:
+                return "0"
+            return "1"
+
+        return re.sub(r"\{([^}]+)\}", _fallback_replacer, hydrated)
 
     def check_session_health(self, endpoint_key: Optional[str] = None) -> bool:
         if not self.endpoints:
@@ -77,7 +83,7 @@ class ReplayExecutor:
         template_url = endpoint_info.get("template_url", "")
         method = endpoint_info.get("method", "GET")
 
-        clean_url = re.sub(r"\{[^}]+\}", "1", template_url)
+        clean_url = self.hydrate_url(template_url)
         headers = self._build_request_headers()
 
         try:

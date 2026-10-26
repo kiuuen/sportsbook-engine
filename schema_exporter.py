@@ -21,6 +21,7 @@ class SchemaExporter:
         "sec-ch-ua-platform",
         "authorization",
         "x-requested-with",
+        "origin",
     }
 
     def __init__(self, base_output_dir: str = "./data/schemas") -> None:
@@ -60,8 +61,11 @@ class SchemaExporter:
     def _extract_essential_headers(headers: Dict[str, str]) -> Dict[str, str]:
         essential: Dict[str, str] = {}
         for k, v in headers.items():
-            if not k.startswith(":") and k.lower() in SchemaExporter.ESSENTIAL_HEADER_KEYS:
-                essential[k.lower()] = v
+            if k.startswith(":"):
+                continue
+            k_lower = k.lower()
+            if k_lower in SchemaExporter.ESSENTIAL_HEADER_KEYS or k_lower.startswith("x-"):
+                essential[k_lower] = v
         return essential
 
     @staticmethod

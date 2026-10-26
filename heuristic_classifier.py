@@ -251,17 +251,27 @@ class HeuristicClassifier:
         }
 
         for key in keys_found:
-            tokens = re.split(r"[_\-\s\.]", key)
+            tokens = [t for t in re.split(r"[_\-\s\.]", key) if t]
+            tokens_set = set(tokens)
             for cat, terms in self.lexicon_mgr.positive_keywords.items():
                 for term in terms:
-                    if term in key or term in tokens:
-                        category_matches[cat] += 1
-                        matched_keywords.add(term)
+                    if len(term) <= 3:
+                        if term in tokens_set:
+                            category_matches[cat] += 1
+                            matched_keywords.add(term)
+                    else:
+                        if term in key or term in tokens_set:
+                            category_matches[cat] += 1
+                            matched_keywords.add(term)
 
             for cat, terms in self.lexicon_mgr.noise_keywords.items():
                 for term in terms:
-                    if term in key or term in tokens:
-                        category_matches[cat] += 1
+                    if len(term) <= 3:
+                        if term in tokens_set:
+                            category_matches[cat] += 1
+                    else:
+                        if term in key or term in tokens_set:
+                            category_matches[cat] += 1
 
         decimal_odds_count = sum(1 for v in numeric_values if self._is_decimal_odds(v))
         american_odds_count = sum(1 for v in numeric_values if self._is_american_odds(v))
@@ -383,14 +393,15 @@ class NoiseAssistant:
         target_url: str,
         filters_path: str = "network_filters.json",
     ) -> None:
-        target_host = urllib.parse.urlparse(target_url).netloc.lower() if target_url else ""
-        clean_target_host = re.sub(r"^www\.", "", target_host) if target_host else ""
+        target_host = urllib.parse.urlparse(target_url).netloc.lower().split(":")[0] if target_url else ""
+        host_parts = [p for p in target_host.split(".") if p]
+        root_domain = ".".join(host_parts[-2:]) if len(host_parts) >= 2 else target_host
 
         # Build set of immune hosts from endpoints with score > 0 or odds_count > 0
         immune_hosts: Set[str] = set()
         for res in classified_results:
             if res.score > 0.0 or res.odds_count > 0:
-                host = urllib.parse.urlparse(res.url).netloc.lower()
+                host = urllib.parse.urlparse(res.url).netloc.lower().split(":")[0]
                 if host:
                     immune_hosts.add(host)
 
@@ -399,8 +410,11 @@ class NoiseAssistant:
                 return True
             if host in immune_hosts:
                 return True
-            if clean_target_host:
-                if host == clean_target_host or host.endswith("." + clean_target_host):
+            if root_domain:
+                if host == root_domain or host.endswith("." + root_domain):
+                    return True
+            if target_host:
+                if host == target_host or host.endswith("." + target_host):
                     return True
             return False
 
@@ -524,7 +538,7 @@ if __name__ == "__main__":
                 if res.score > 0.0 or res.is_grey_zone:
                     results.append(res)
 
-            results.sort(key=lambda r: r.score, reverse=True)
+            results.sort(key=lambda r: (r.score, r.odds_count, r.call_count), reverse=True)
 
             print("=======================================================")
             print("         SCORED CANDIDATE ENDPOINTS SUMMARY            ")

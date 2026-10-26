@@ -45,10 +45,10 @@ class ReplayExecutor:
             raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
 
     def _build_request_headers(self) -> Dict[str, str]:
-        headers: Dict[str, str] = {k: v for k, v in self.session_headers.items() if not k.startswith(":")}
+        headers: Dict[str, str] = {k.lower(): v for k, v in self.session_headers.items() if not k.startswith(":")}
         if self.session_cookies:
             cookie_str = "; ".join(f"{k}={v}" for k, v in self.session_cookies.items())
-            headers["Cookie"] = cookie_str
+            headers["cookie"] = cookie_str
         return headers
 
     def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -140,7 +140,7 @@ class ReplayExecutor:
         hydrated_url = self.hydrate_url(template_url, params)
         headers = self._build_request_headers()
 
-        header_flags = " ".join([f'-H "{k}: {v}"' for k, v in headers.items()])
+        header_flags = " ".join([f'-H "{k.lower()}: {v.replace(\'"\', \'\\\\"\')}"' for k, v in headers.items()])
         if header_flags:
             return f'curl -X {method} "{hydrated_url}" {header_flags}'
         return f'curl -X {method} "{hydrated_url}"'
@@ -148,31 +148,87 @@ class ReplayExecutor:
 
 if __name__ == "__main__":
     schema_dir = pathlib.Path("./data/schemas")
-    schema_files = list(schema_dir.glob("*.json")) if schema_dir.exists() else []
+    schema_files = sorted(list(schema_dir.glob("*.json"))) if schema_dir.exists() else []
 
     if not schema_files:
         print("[-] No schema JSON files found in ./data/schemas/. Please run discovery first.")
     else:
-        selected_schema = schema_files[0]
-        print(f"[*] Loading schema blueprint: {selected_schema.name}")
-        executor = ReplayExecutor(selected_schema)
+        print("\n=======================================================")
+        print("           REPLAY EXECUTOR INTERACTIVE CLI             ")
+        print("=======================================================")
+        print("[*] Available Target Schemas:")
+        for idx, s_file in enumerate(schema_files, start=1):
+            print(f"    [{idx}] {s_file.name}")
+
+        selected_file: Optional[pathlib.Path] = None
+        while selected_file is None:
+            user_input = input(f"\nSelect a schema number (1-{len(schema_files)}): ").strip()
+            if user_input.isdigit():
+                choice = int(user_input)
+                if 1 <= choice <= len(schema_files):
+                    selected_file = schema_files[choice - 1]
+                else:
+                    print(f"[-] Invalid selection. Please enter a number between 1 and {len(schema_files)}.")
+            else:
+                print("[-] Invalid input. Please enter a numeric value.")
+
+        print(f"\n[*] Loading schema blueprint: {selected_file.name}")
+        executor = ReplayExecutor(selected_file)
 
         is_healthy = executor.check_session_health()
         print(f"[+] Session Health Status: {'ACTIVE (200 OK)' if is_healthy else 'EXPIRED / INVALID'}")
 
-        if executor.endpoints:
-            first_endpoint_key = next(iter(executor.endpoints.keys()))
-            curl_cmd = executor.to_curl(first_endpoint_key)
-            print(f"\n[*] Generated cURL command for '{first_endpoint_key}':")
-            print(f"    {curl_cmd}\n")
+        endpoint_keys = list(executor.endpoints.keys())
+        if not endpoint_keys:
+            print("[-] No endpoints found in selected schema.")
+        else:
+            print("\n-------------------------------------------------------")
+            print("Available Endpoints:")
+            for idx, ep_key in enumerate(endpoint_keys, start=1):
+                print(f"    [{idx}] {ep_key}")
+            batch_option_idx = len(endpoint_keys) + 1
+            print(f"    [{batch_option_idx}] [Batch Test] Probe all endpoints in sequence")
 
-            if is_healthy:
-                print(f"[*] Executing live fetch for endpoint '{first_endpoint_key}'...")
+            selected_ep_idx: Optional[int] = None
+            while selected_ep_idx is None:
+                ep_input = input(f"\nSelect an endpoint option (1-{batch_option_idx}): ").strip()
+                if ep_input.isdigit():
+                    ep_choice = int(ep_input)
+                    if 1 <= ep_choice <= batch_option_idx:
+                        selected_ep_idx = ep_choice
+                    else:
+                        print(f"[-] Invalid selection. Enter a number between 1 and {batch_option_idx}.")
+                else:
+                    print("[-] Invalid input. Please enter a numeric value.")
+
+            if selected_ep_idx == batch_option_idx:
+                print("\n=======================================================")
+                print("            BATCH ENDPOINT HEALTH PROBE RESULTS        ")
+                print("=======================================================")
+                for ep_key in endpoint_keys:
+                    print(f"\n[*] Probing endpoint: {ep_key}")
+                    curl_cmd = executor.to_curl(ep_key)
+                    print(f"    cURL: {curl_cmd}")
+                    try:
+                        resp_payload = executor.execute(ep_key)
+                        print("    Status: [SUCCESS 200 OK]")
+                        json_str = json.dumps(resp_payload, indent=2)
+                        preview = "\n".join(json_str.splitlines()[:5])
+                        print(f"    Preview:\n{preview}")
+                    except Exception as err:
+                        print(f"    Status: [FAILED] - {err}")
+            else:
+                target_key = endpoint_keys[selected_ep_idx - 1]
+                print("\n=======================================================")
+                print(f"         SINGLE ENDPOINT EXECUTION: {target_key}")
+                print("=======================================================")
+                curl_cmd = executor.to_curl(target_key)
+                print(f"[*] Generated Escaped cURL:\n    {curl_cmd}\n")
+                print(f"[*] Executing live fetch for '{target_key}'...")
                 try:
-                    response_data = executor.execute(first_endpoint_key)
+                    response_data = executor.execute(target_key)
                     json_str = json.dumps(response_data, indent=2)
-                    lines = json_str.splitlines()
-                    preview = "\n".join(lines[:10])
+                    preview = "\n".join(json_str.splitlines()[:10])
                     print(f"[+] Response Preview (First 10 lines):\n{preview}")
                 except Exception as ex:
                     print(f"[-] Execution failed: {ex}")

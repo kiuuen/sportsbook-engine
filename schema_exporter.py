@@ -61,12 +61,12 @@ class SchemaExporter:
         essential: Dict[str, str] = {}
         for k, v in headers.items():
             if not k.startswith(":") and k.lower() in SchemaExporter.ESSENTIAL_HEADER_KEYS:
-                essential[k] = v
+                essential[k.lower()] = v
         return essential
 
     @staticmethod
     def _generate_curl(method: str, url: str, headers: Dict[str, str]) -> str:
-        header_flags = " ".join([f'-H "{k}: {v}"' for k, v in headers.items()])
+        header_flags = " ".join([f'-H "{k.lower()}: {v.replace(\'"\', \'\\\\"\')}"' for k, v in headers.items()])
         if header_flags:
             return f'curl -X {method} "{url}" {header_flags}'
         return f'curl -X {method} "{url}"'

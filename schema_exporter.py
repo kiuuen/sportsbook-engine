@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import pathlib
 import re
 import urllib.parse
@@ -69,6 +70,33 @@ class SchemaExporter:
             return f'curl -X {method} "{url}" {header_flags}'
         return f'curl -X {method} "{url}"'
 
+    @staticmethod
+    def _truncate_payload(data: Any, max_list_items: int = 5) -> Any:
+        """Recorta recursivamente matrices grandes y objetos anidados.
+
+        Args:
+            data: Valor JSON serializable (dict, list, primitivo).
+            max_list_items: Número máximo de elementos a conservar en cualquier matriz.
+
+        Returns:
+            Una copia profunda de ``data`` donde cada matriz excede ``max_list_items``
+            se trunca a los primeros *max_list_items* elementos. La estructura de claves
+            del diccionario original se preserva.
+        """
+        if isinstance(data, list):
+            # Truncar si excede el límite, luego procesar cada elemento retenido
+            if len(data) > max_list_items:
+                truncated = data[:max_list_items]
+                return [SchemaExporter._truncate_payload(item, max_list_items) for item in truncated]
+            else:
+                return [SchemaExporter._truncate_payload(item, max_list_items) for item in data]
+        elif isinstance(data, dict):
+            # Conservar todas las claves; truncar valores recursivamente
+            return {k: SchemaExporter._truncate_payload(v, max_list_items) for k, v in data.items()}
+        else:
+            # Tipos primitivos: devolver sin cambios
+            return data
+
     def export_schema(
         self,
         target_url: str,
@@ -104,22 +132,52 @@ class SchemaExporter:
 
             curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers)
 
-            parsed_payload: Any = None
+            # Analizar respuesta cruda (si existe)
             raw_body = getattr(sample_ev, "response_body", None) if sample_ev else None
+            parsed_payload: Any = None
             if raw_body:
                 try:
                     parsed_payload = json.loads(raw_body)
                 except Exception:
+                    # No se puede analizar – conservar como cadena sin cambios
                     parsed_payload = raw_body
 
-            endpoint_key = f"endpoint_{idx + 1}"
-            endpoints_dict[endpoint_key] = {
+            # ----- REDUCCIÓN DE CARGA ÚTIL LIGERA -----
+            # Solo aplicar truncamiento a objetos JSON completos (dict/list); los valores escalares permanecen intactos.
+            sanitized_payload: Any = parsed_payload
+            if isinstance(parsed_payload, (list, dict)):
+                try:
+                    # Primer paso: limitar el tamaño de las matrices a 5 elementos
+                    sanitized_payload = self._truncate_payload(parsed_payload, max_list_items=5)
+
+                    # Segundo paso: limitar el tamaño total serializado a ~8 KB para mantener el archivo ligero
+                    try:
+                        payload_json = json.dumps(sanitized_payload, separators=(',', ':'))
+                        max_bytes = 8192  # 8 KB
+                        if len(payload_json.encode('utf-8')) > max_bytes:
+                            # Reducir progresivamente el límite de la matriz hasta que quepa
+                            for limit in (4, 3, 2):
+                                sanitized_payload = self._truncate_payload(parsed_payload, max_list_items=limit)
+                                payload_json = json.dumps(sanitized_payload, separators=(',', ':'))
+                                if len(payload_json.encode('utf-8')) <= max_bytes:
+                                    break
+                    except Exception as json_err:
+                        logging.warning(f"Size-check failed for payload: {json_err}")
+                        sanitized_payload = {}  # fallback to empty dict
+                except Exception as trunc_err:
+                    logging.warning(f"Payload truncation error: {trunc_err}")
+                    sanitized_payload = parsed_payload  # revert to original if something goes wrong
+            # --------------------------------------------
+
+            # Almacenar la carga útil (potencialmente truncada) en el esquema
+            endpoint_data = {
                 "method": method,
                 "template_url": template_url,
                 "dynamic_parameters": dynamic_params,
                 "curl_command": curl_cmd,
-                "sample_response": parsed_payload,
+                "sample_response": sanitized_payload,
             }
+            endpoints_dict[endpoint_key] = endpoint_data
 
         schema_payload = {
             "target_domain": target_domain,

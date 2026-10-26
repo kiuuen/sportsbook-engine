@@ -666,13 +666,16 @@ if __name__ == "__main__":
                 )
 
                 # Export validated blueprint schema to JSON file
-                exporter = SchemaExporter()
-                saved_path = exporter.export_schema(
-                    target_url=target_url,
-                    classified_results=results,
-                    events=events,
-                )
-                print(f"\n[+] Discovery Blueprint Schema persisted successfully to: {saved_path.resolve()}")
+                try:
+                    exporter = SchemaExporter()
+                    saved_path = exporter.export_schema(
+                        target_url=target_url,
+                        classified_results=results,
+                        events=events,
+                    )
+                    print(f"\n[+] Schema successfully exported to: {saved_path.resolve()}")
+                except Exception as err:
+                    logging.error(f"[Exporter Error] Failed to export schema: {err}", exc_info=True)
 
             print("\n=======================================================\n")
 

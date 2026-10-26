@@ -8,7 +8,8 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cdp_interceptor import NetworkEvent
-from heuristic_classifier import ClassificationResult
+from heuristic_classifier import ClassificationResult, HeuristicClassifier, RouteTemplateDeducer, AutomatedReplayProber, NoiseAssistant
+from browser_orchestrator import ChromeOrchestrator
 from database_manager import DatabaseManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

@@ -158,9 +158,12 @@ class SchemaExporter:
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
         for res in classified_results:
-            # Strict Odds Threshold: only export core endpoints with odds_count >= 5
+            # Enforce Composite Heuristic Validation Guard (multi-factor confidence)
+            is_viable: bool = getattr(res, "is_viable", False)
             odds_count: int = getattr(res, "odds_count", 0)
-            if odds_count < 5:
+            score: float = getattr(res, "score", 0.0)
+
+            if not is_viable or odds_count < 5 or score < 45.0:
                 continue
 
             sample_ev: Optional[NetworkEvent] = getattr(res, "sample_event", None)

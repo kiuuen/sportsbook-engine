@@ -30,6 +30,7 @@ class ClassificationResult:
     call_count: int = 1
     time_span_seconds: float = 0.0
     sample_event: Optional[NetworkEvent] = None
+    is_viable: bool = False
 
 
 class LexiconManager:
@@ -186,43 +187,107 @@ class HeuristicClassifier:
                 logging.warning(f"Could not load {self.filters_path}: {e}")
         return []
 
-    def _inspect_node(
-        self,
-        node: Any,
-        keys_found: List[str],
-        numeric_values: List[float],
-        array_lengths: List[int],
-        contextual_numerics: Optional[List[Tuple[str, float]]] = None,
-        parent_key: str = "",
-    ) -> None:
-        if contextual_numerics is None:
-            contextual_numerics = []
+    def _match_key_categories(self, key_str: str) -> Tuple[Set[str], Set[str], Set[str]]:
+        tokens = [t for t in re.split(r"[_\-\s\.]", key_str) if t]
+        tokens_set = set(tokens)
+        matched_pos_cats: Set[str] = set()
+        matched_noise_cats: Set[str] = set()
+        matched_terms: Set[str] = set()
 
+        for cat, terms in self.lexicon_mgr.positive_keywords.items():
+            for term in terms:
+                if (len(term) <= 3 and term in tokens_set) or (len(term) > 3 and (term in key_str or term in tokens_set)):
+                    matched_pos_cats.add(cat)
+                    matched_terms.add(term)
+
+        for cat, terms in self.lexicon_mgr.noise_keywords.items():
+            for term in terms:
+                if (len(term) <= 3 and term in tokens_set) or (len(term) > 3 and (term in key_str or term in tokens_set)):
+                    matched_noise_cats.add(cat)
+
+        return matched_pos_cats, matched_noise_cats, matched_terms
+
+    def _collect_subtree_positive_categories(self, node: Any) -> Set[str]:
+        pos_cats: Set[str] = set()
         if isinstance(node, dict):
             for k, v in node.items():
-                key_str = str(k).lower()
-                keys_found.append(key_str)
-                self._inspect_node(
-                    v, keys_found, numeric_values, array_lengths, contextual_numerics, parent_key=key_str
+                k_pos, _, _ = self._match_key_categories(str(k).lower())
+                pos_cats.update(k_pos)
+                pos_cats.update(self._collect_subtree_positive_categories(v))
+        elif isinstance(node, list):
+            for item in node:
+                pos_cats.update(self._collect_subtree_positive_categories(item))
+        return pos_cats
+
+    def _traverse_relational_structures(
+        self,
+        node: Any,
+        is_repetitive_context: bool,
+        ancestor_positive_categories: Set[str],
+        keys_found: List[str],
+        structural_odds: List[float],
+        array_lengths: List[int],
+        contextual_numerics: List[Tuple[str, float]],
+        parent_key: str = "",
+    ) -> None:
+        if isinstance(node, dict):
+            local_pos_in_keys: Set[str] = set()
+            for k in node.keys():
+                k_str = str(k).lower()
+                keys_found.append(k_str)
+                k_pos, _, _ = self._match_key_categories(k_str)
+                local_pos_in_keys.update(k_pos)
+
+            current_pos_categories = ancestor_positive_categories | local_pos_in_keys
+            subtree_pos_categories = current_pos_categories | self._collect_subtree_positive_categories(node)
+
+            for k, v in node.items():
+                k_str = str(k).lower()
+                self._traverse_relational_structures(
+                    v,
+                    is_repetitive_context=is_repetitive_context,
+                    ancestor_positive_categories=subtree_pos_categories,
+                    keys_found=keys_found,
+                    structural_odds=structural_odds,
+                    array_lengths=array_lengths,
+                    contextual_numerics=contextual_numerics,
+                    parent_key=k_str,
                 )
         elif isinstance(node, list):
-            array_lengths.append(len(node))
+            array_len = len(node)
+            array_lengths.append(array_len)
+            is_homogeneous_repetitive = array_len >= 2 and all(isinstance(item, (dict, list)) for item in node)
+            child_repetitive_flag = is_repetitive_context or is_homogeneous_repetitive
+
             for item in node:
-                self._inspect_node(
-                    item, keys_found, numeric_values, array_lengths, contextual_numerics, parent_key=parent_key
+                self._traverse_relational_structures(
+                    item,
+                    is_repetitive_context=child_repetitive_flag,
+                    ancestor_positive_categories=ancestor_positive_categories,
+                    keys_found=keys_found,
+                    structural_odds=structural_odds,
+                    array_lengths=array_lengths,
+                    contextual_numerics=contextual_numerics,
+                    parent_key=parent_key,
                 )
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
             val = float(node)
-            numeric_values.append(val)
             if parent_key:
                 contextual_numerics.append((parent_key, val))
+            # Odds require structural co-occurrence in repetitive nodes alongside positive categories
+            if is_repetitive_context and bool(ancestor_positive_categories):
+                if self._is_decimal_odds(val) or self._is_american_odds(val):
+                    structural_odds.append(val)
         elif isinstance(node, str):
-            if re.match(r"^-?\d+(\.\d+)?$", node.strip()):
+            clean_str = node.strip()
+            if re.match(r"^-?\d+(\.\d+)?$", clean_str):
                 try:
-                    val = float(node.strip())
-                    numeric_values.append(val)
+                    val = float(clean_str)
                     if parent_key:
                         contextual_numerics.append((parent_key, val))
+                    if is_repetitive_context and bool(ancestor_positive_categories):
+                        if self._is_decimal_odds(val) or self._is_american_odds(val):
+                            structural_odds.append(val)
                 except ValueError:
                     pass
 
@@ -252,6 +317,7 @@ class HeuristicClassifier:
                 call_count=call_count,
                 time_span_seconds=time_span_seconds,
                 sample_event=sample_event,
+                is_viable=False,
             )
 
         try:
@@ -266,16 +332,26 @@ class HeuristicClassifier:
                 call_count=call_count,
                 time_span_seconds=time_span_seconds,
                 sample_event=sample_event,
+                is_viable=False,
             )
 
         keys_found: List[str] = []
-        numeric_values: List[float] = []
+        structural_odds: List[float] = []
         array_lengths: List[int] = []
         contextual_numerics: List[Tuple[str, float]] = []
 
-        self._inspect_node(data, keys_found, numeric_values, array_lengths, contextual_numerics)
+        self._traverse_relational_structures(
+            node=data,
+            is_repetitive_context=False,
+            ancestor_positive_categories=set(),
+            keys_found=keys_found,
+            structural_odds=structural_odds,
+            array_lengths=array_lengths,
+            contextual_numerics=contextual_numerics,
+            parent_key="",
+        )
 
-        if not keys_found and not numeric_values:
+        if not keys_found and not structural_odds:
             return ClassificationResult(
                 url=url,
                 url_template=url_template,
@@ -285,6 +361,7 @@ class HeuristicClassifier:
                 call_count=call_count,
                 time_span_seconds=time_span_seconds,
                 sample_event=sample_event,
+                is_viable=False,
             )
 
         matched_keywords: Set[str] = set()
@@ -294,35 +371,18 @@ class HeuristicClassifier:
         }
 
         for key in keys_found:
-            tokens = [t for t in re.split(r"[_\-\s\.]", key) if t]
-            tokens_set = set(tokens)
-            for cat, terms in self.lexicon_mgr.positive_keywords.items():
-                for term in terms:
-                    if len(term) <= 3:
-                        if term in tokens_set:
-                            category_matches[cat] += 1
-                            matched_keywords.add(term)
-                            if cat == "betting_markets_and_odds":
-                                core_betting_matched_terms.add(term)
-                    else:
-                        if term in key or term in tokens_set:
-                            category_matches[cat] += 1
-                            matched_keywords.add(term)
-                            if cat == "betting_markets_and_odds":
-                                core_betting_matched_terms.add(term)
+            pos_cats, noise_cats, terms = self._match_key_categories(key)
+            for c in pos_cats:
+                category_matches[c] += 1
+            for c in noise_cats:
+                category_matches[c] += 1
+            matched_keywords.update(terms)
+            if "betting_markets_and_odds" in pos_cats:
+                core_betting_matched_terms.update(
+                    terms.intersection(self.lexicon_mgr.positive_keywords.get("betting_markets_and_odds", set()))
+                )
 
-            for cat, terms in self.lexicon_mgr.noise_keywords.items():
-                for term in terms:
-                    if len(term) <= 3:
-                        if term in tokens_set:
-                            category_matches[cat] += 1
-                    else:
-                        if term in key or term in tokens_set:
-                            category_matches[cat] += 1
-
-        decimal_odds_count = sum(1 for v in numeric_values if self._is_decimal_odds(v))
-        american_odds_count = sum(1 for v in numeric_values if self._is_american_odds(v))
-        total_odds_count = decimal_odds_count + american_odds_count
+        total_odds_count = len(structural_odds)
 
         core_terms = self.lexicon_mgr.positive_keywords.get("betting_markets_and_odds", set())
         contextual_odds_count = 0
@@ -370,15 +430,38 @@ class HeuristicClassifier:
 
         final_score = max(0.0, min(100.0, raw_score))
 
-        # Mandatory Odds Gate: payloads without odds cannot exceed 40.0
         if total_odds_count == 0:
             final_score = min(final_score, 40.0)
 
+        # Composite Signal-to-Noise Confidence Validation
+        total_pos_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.POSITIVE_CATEGORIES)
+        total_noise_matches = sum(category_matches[cat] for cat in self.lexicon_mgr.NOISE_CATEGORIES)
+        active_pos_categories_count = sum(1 for cat in self.lexicon_mgr.POSITIVE_CATEGORIES if category_matches[cat] > 0)
+
+        has_lexical_diversity = active_pos_categories_count >= 2 or len(core_betting_matched_terms) >= 1
+        has_structural_repetition = len(significant_arrays) >= 1
+        favorable_signal_ratio = total_pos_matches > (total_noise_matches * 1.5) and pos_score >= noise_score
+        has_adequate_odds = total_odds_count >= 5
+
+        is_composite_confident = (
+            final_score >= 45.0
+            and has_lexical_diversity
+            and has_structural_repetition
+            and favorable_signal_ratio
+            and has_adequate_odds
+        )
+
+        # Generic payloads failing composite confidence must not enter grey zone
         has_structural_relevance = total_odds_count >= 3 or len(significant_arrays) >= 2
         low_vocabulary = pos_score < 10.0
         low_noise = noise_score < 10.0
-
-        is_grey_zone = has_structural_relevance and low_vocabulary and low_noise
+        is_grey_zone = (
+            has_structural_relevance
+            and low_vocabulary
+            and low_noise
+            and total_noise_matches == 0
+            and total_odds_count >= 3
+        )
 
         ambiguous_keys: List[str] = []
         if is_grey_zone:
@@ -407,6 +490,7 @@ class HeuristicClassifier:
             call_count=call_count,
             time_span_seconds=round(time_span_seconds, 2),
             sample_event=sample_event,
+            is_viable=is_composite_confident,
         )
 
 
@@ -606,7 +690,7 @@ if __name__ == "__main__":
                     time_span_seconds=time_span,
                     sample_event=sample_event,
                 )
-                if res.score > 0.0 or res.is_grey_zone:
+                if res.is_viable or res.is_grey_zone:
                     results.append(res)
 
             results.sort(

@@ -145,15 +145,65 @@ class SchemaExporter:
 
     @staticmethod
     def _infer_provider_family(target_domain: str, endpoints: Dict[str, Any]) -> str:
-        clean_domain = target_domain.replace(".", "_").replace("-", "_")
+        gateway_hosts: Dict[str, int] = {}
+        route_taxonomy_segments: Set[str] = set()
         structural_keys: Set[str] = set()
-        for ep_info in endpoints.values():
+
+        for ep_key, ep_info in endpoints.items():
+            template_url = ep_info.get("template_url", "")
+            parsed_url = urllib.parse.urlparse(template_url)
+            netloc = parsed_url.netloc.lower().split(":")[0]
+            if netloc:
+                gateway_hosts[netloc] = gateway_hosts.get(netloc, 0) + 1
+
+            path_parts = [p.lower() for p in parsed_url.path.split("/") if p and not p.startswith("{")]
+            route_taxonomy_segments.update(path_parts[:3])
+
             sample_resp = ep_info.get("sample_response", {})
             if isinstance(sample_resp, dict):
                 structural_keys.update(list(sample_resp.keys())[:5])
 
-        signature_hash = sum(ord(c) for c in "".join(sorted(structural_keys))) % 10000
-        return f"provider_{clean_domain}_{signature_hash:04d}"
+        if gateway_hosts:
+            primary_gateway = max(gateway_hosts.items(), key=lambda x: x[1])[0]
+        else:
+            primary_gateway = target_domain
+
+        clean_gateway = primary_gateway.replace(".", "_").replace("-", "_").replace("www_", "")
+        taxonomy_sig = "".join(sorted(route_taxonomy_segments)) + "".join(sorted(structural_keys))
+        signature_hash = sum(ord(c) for c in taxonomy_sig) % 10000 if taxonomy_sig else 1000
+
+        return f"provider_{clean_gateway}_{signature_hash:04d}"
+
+    @staticmethod
+    def _build_canonical_pipeline(endpoints: Dict[str, Dict[str, Any]]) -> Dict[str, Optional[str]]:
+        pipeline: Dict[str, Optional[str]] = {
+            "sports_catalog": None,
+            "live_overview": None,
+            "upcoming_fixtures": None,
+            "match_detail_metrics": None,
+        }
+
+        for ep_key, ep_info in endpoints.items():
+            role = ep_info.get("role", "")
+            volatility = ep_info.get("volatility", "")
+            template_url = ep_info.get("template_url", "").lower()
+            dynamic_params = ep_info.get("dynamic_parameters", [])
+
+            if role == "catalog_root" and pipeline["sports_catalog"] is None:
+                pipeline["sports_catalog"] = ep_key
+
+            is_live_signal = "live" in template_url or "inplay" in template_url or volatility == "realtime"
+            if role == "fixtures_list" and is_live_signal and pipeline["live_overview"] is None:
+                pipeline["live_overview"] = ep_key
+
+            if role == "fixtures_list" and not is_live_signal and pipeline["upcoming_fixtures"] is None:
+                pipeline["upcoming_fixtures"] = ep_key
+
+            has_match_param = any("event" in p.lower() or "match" in p.lower() or "fixture" in p.lower() for p in dynamic_params)
+            if (role == "odds_detail" or has_match_param) and pipeline["match_detail_metrics"] is None:
+                pipeline["match_detail_metrics"] = ep_key
+
+        return pipeline
 
     def export_schema(
         self,
@@ -249,6 +299,7 @@ class SchemaExporter:
             return None
 
         provider_family = self._infer_provider_family(target_domain, endpoints_dict or auxiliary_endpoints_dict)
+        canonical_pipeline = self._build_canonical_pipeline(endpoints_dict)
 
         producers_map: Dict[str, List[str]] = {}
         consumers_map: Dict[str, List[str]] = {}
@@ -267,6 +318,7 @@ class SchemaExporter:
                 "essential_headers": session_headers,
                 "cookies": session_cookies,
             },
+            "canonical_pipeline": canonical_pipeline,
             "dependency_graph": {
                 "producers": producers_map,
                 "consumers": consumers_map,

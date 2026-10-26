@@ -507,6 +507,21 @@ class HeuristicClassifier:
 
         final_score = max(0.0, min(100.0, raw_score))
 
+        # Enforce strict zero-scoring for noise categories or non-target entertainment catalogs
+        entertainment_keywords = {
+            "casino", "slot", "slots", "poker", "bingo", "lottery",
+            "cashier", "deposit", "withdraw", "promo", "promotions", "avatar"
+        }
+        has_entertainment_signals = any(kw in url_lower for kw in entertainment_keywords) or any(
+            any(kw in key for kw in entertainment_keywords) for key in keys_found
+        )
+
+        if total_noise_matches > 0 and (not has_sports_context or total_odds_count == 0 or noise_score >= pos_score):
+            final_score = 0.0
+
+        if has_entertainment_signals and (not has_sports_context or total_odds_count < 2):
+            final_score = 0.0
+
         # Disqualify payloads dominated by UI/theme styling tokens or generic casino catalogs without sports context
         if style_token_count >= 3 or (style_token_count > 0 and total_odds_count == 0):
             final_score = 0.0

@@ -177,6 +177,7 @@ class SchemaExporter:
                 "curl_command": curl_cmd,
                 "sample_response": sanitized_payload,
             }
+            endpoint_key = f"{method}_{template_url}"
             endpoints_dict[endpoint_key] = endpoint_data
 
         schema_payload = {

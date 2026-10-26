@@ -1,0 +1,182 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "encryption_key": "env.BIFROST_ENCRYPTION_KEY",
+  "client": {
+    "initial_pool_size": 400,
+    "drop_excess_requests": false,
+    "enable_logging": true,
+    "log_retention_days": 14
+  },
+  "providers": {
+
+    "mistral": {
+      "keys": [
+        { "name": "mistral-1", "value": "env.MISTRAL_KEY_1", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 },
+        { "name": "mistral-2", "value": "env.MISTRAL_KEY_2", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 },
+        { "name": "mistral-3", "value": "env.MISTRAL_KEY_3", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 },
+        { "name": "mistral-4", "value": "env.MISTRAL_KEY_4", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 },
+        { "name": "mistral-5", "value": "env.MISTRAL_KEY_5", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 },
+        { "name": "mistral-6", "value": "env.MISTRAL_KEY_6", "models": ["codestral-latest", "devstral-latest", "mistral-medium-latest", "mistral-large-4", "mistral-large-latest"], "weight": 1.0 }
+      ],
+      "network_config": { "default_request_timeout_in_seconds": 60, "max_retries": 3 }
+    },
+
+    "nvidia": {
+      "keys": [
+        { "name": "nvidia-1", "value": "env.NVIDIA_KEY_1", "models": ["deepseek-ai/deepseek-v4-pro", "deepseek-ai/deepseek-v4-flash", "qwen/qwen3-coder-480b-a35b-instruct"], "weight": 1.0 },
+        { "name": "nvidia-2", "value": "env.NVIDIA_KEY_2", "models": ["deepseek-ai/deepseek-v4-pro", "deepseek-ai/deepseek-v4-flash", "qwen/qwen3-coder-480b-a35b-instruct"], "weight": 1.0 },
+        { "name": "nvidia-3", "value": "env.NVIDIA_KEY_3", "models": ["deepseek-ai/deepseek-v4-pro", "deepseek-ai/deepseek-v4-flash", "qwen/qwen3-coder-480b-a35b-instruct"], "weight": 1.0 }
+      ],
+      "network_config": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "default_request_timeout_in_seconds": 90,
+        "max_retries": 3
+      },
+      "custom_provider_config": {
+        "is_key_less": false,
+        "base_provider_type": "openai",
+        "allowed_requests": { "chat_completion": true, "chat_completion_stream": true }
+      }
+    },
+
+    "siliconflow": {
+      "keys": [
+        { "name": "siliconflow-1", "value": "env.SILICONFLOW_KEY_1", "models": ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro", "moonshotai/Kimi-K2.7-Code"], "weight": 1.0 }
+      ],
+      "network_config": {
+        "base_url": "https://api.siliconflow.cn/v1",
+        "default_request_timeout_in_seconds": 60,
+        "max_retries": 2
+      },
+      "custom_provider_config": {
+        "is_key_less": false,
+        "base_provider_type": "openai",
+        "allowed_requests": { "chat_completion": true, "chat_completion_stream": true }
+      }
+    },
+
+    "gemini": {
+      "keys": [
+        { "name": "gemini-1", "value": "env.GEMINI_KEY_1", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 },
+        { "name": "gemini-2", "value": "env.GEMINI_KEY_2", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 },
+        { "name": "gemini-3", "value": "env.GEMINI_KEY_3", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 },
+        { "name": "gemini-4", "value": "env.GEMINI_KEY_4", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 },
+        { "name": "gemini-5", "value": "env.GEMINI_KEY_5", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 },
+        { "name": "gemini-6", "value": "env.GEMINI_KEY_6", "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"], "weight": 1.0 }
+      ],
+      "network_config": { "default_request_timeout_in_seconds": 60, "max_retries": 3 }
+    },
+
+    "cerebras": {
+      "keys": [
+        { "name": "cerebras-1", "value": "env.CEREBRAS_KEY_1", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 },
+        { "name": "cerebras-2", "value": "env.CEREBRAS_KEY_2", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 },
+        { "name": "cerebras-3", "value": "env.CEREBRAS_KEY_3", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 },
+        { "name": "cerebras-4", "value": "env.CEREBRAS_KEY_4", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 },
+        { "name": "cerebras-5", "value": "env.CEREBRAS_KEY_5", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 },
+        { "name": "cerebras-6", "value": "env.CEREBRAS_KEY_6", "models": ["gpt-oss-120b", "zai-glm-4.7"], "weight": 1.0 }
+      ],
+      "network_config": { "default_request_timeout_in_seconds": 30, "max_retries": 2 }
+    },
+
+    "cohere": {
+      "keys": [
+        { "name": "cohere-1", "value": "env.COHERE_KEY_1", "models": ["command-a-plus-05-2026", "north-mini-code-1-0"], "weight": 1.0 }
+      ],
+      "network_config": { "default_request_timeout_in_seconds": 30, "max_retries": 2 }
+    },
+
+    "groq": {
+      "keys": [
+        {
+          "name": "groq-1",
+          "value": "env.GROQ_KEY_1",
+          "models": ["openai/gpt-oss-120b", "qwen/qwen3.6-27b"],
+          "weight": 1.0
+        }
+      ],
+      "network_config": { "default_request_timeout_in_seconds": 30, "max_retries": 1 }
+    }
+  },
+
+  "governance": {
+    "auth_config": {
+      "is_enabled": false,
+      "disable_auth_on_inference": true
+    },
+
+    "routing_rules": [
+      {
+        "id": "rule-tier-triage",
+        "name": "Triage Tier (consultas ultrarrápidas / git checks)",
+        "enabled": true,
+        "cel_expression": "model.contains('tier-triage')",
+        "targets": [
+          { "provider": "gemini", "model": "gemini-3.5-flash-lite", "weight": 0.6 },
+          { "provider": "cerebras", "model": "zai-glm-4.7", "weight": 0.4 }
+        ],
+        "fallbacks": [
+          "gemini/gemini-3.1-flash-lite",
+          "cerebras/gpt-oss-120b",
+          "groq/openai/gpt-oss-120b"
+        ],
+        "scope": "global",
+        "priority": 0
+      },
+      {
+        "id": "rule-tier-plan",
+        "name": "Plan Tier (razonamiento, arquitectura, /architect, contexto grande)",
+        "enabled": true,
+        "cel_expression": "model.contains('tier-plan')",
+        "targets": [
+          { "provider": "gemini", "model": "gemini-3.8-flash", "weight": 0.6 },
+          { "provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro", "weight": 0.4 }
+        ],
+        "fallbacks": [
+          "gemini/gemini-3.6-flash",
+          "siliconflow/deepseek-ai/DeepSeek-V4-Pro",
+          "nvidia/deepseek-ai/deepseek-v4-flash",
+          "mistral/mistral-large-latest",
+          "mistral/mistral-large-4",
+          "cohere/command-a-plus-05-2026",
+          "cerebras/zai-glm-4.7"
+        ],
+        "scope": "global",
+        "priority": 1
+      },
+      {
+        "id": "rule-tier-build",
+        "name": "Build Tier (generación de código, diffs, /code, refactors de 900 líneas)",
+        "enabled": true,
+        "cel_expression": "model.contains('tier-build')",
+        "targets": [
+          { "provider": "mistral", "model": "codestral-latest", "weight": 0.6 },
+          { "provider": "nvidia", "model": "qwen/qwen3-coder-480b-a35b-instruct", "weight": 0.4 }
+        ],
+        "fallbacks": [
+          "siliconflow/moonshotai/Kimi-K2.7-Code",
+          "siliconflow/deepseek-ai/DeepSeek-V4-Pro",
+          "nvidia/deepseek-ai/deepseek-v4-pro",
+          "mistral/devstral-latest",
+          "mistral/mistral-large-latest",
+          "gemini/gemini-3.8-flash",
+          "gemini/gemini-3.6-flash",
+          "cohere/north-mini-code-1-0"
+        ],
+        "scope": "global",
+        "priority": 2
+      }
+    ]
+  },
+
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": { "path": "./config.db" }
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": { "path": "./logs.db" }
+  }
+}

@@ -1,0 +1,195 @@
+{
+  "target_domain": "betobet.com",
+  "provider_family": "provider_gw_betostar_com_4291",
+  "discovered_at": "2026-10-26T05:41:06.932966+00:00",
+  "session": {
+    "essential_headers": {
+      "sec-ch-ua-platform": "\"Windows\"",
+      "referer": "https://gw.betostar.com/es/euro/event/paris-saint-germain-vs-olympique-de-lyon/12694872?marketCategory=all",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "origin": "https://gw.betostar.com",
+      "accept": "application/json, text/plain, */*",
+      "x-requested-with": "XMLHttpRequest"
+    },
+    "cookies": {}
+  },
+  "canonical_pipeline": {
+    "sports_catalog": "GET_https://gw.betostar.com/es/index/operation/getSportSettings?view=euro",
+    "live_overview": null,
+    "upcoming_fixtures": "POST_https://gw.betostar.com/es/euro/operation/getBoostedSelections",
+    "match_detail_metrics": "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+  },
+  "dependency_graph": {
+    "producers": {
+      "game_period_id": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+      ],
+      "line_entity_id": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+      ],
+      "market_key": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+      ],
+      "market_type_id": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings",
+        "POST_https://gw.betostar.com/es/euro/operation/getBoostedSelections"
+      ],
+      "sport_id": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+      ],
+      "sport_key": [
+        "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings"
+      ],
+      "event_id": [
+        "POST_https://gw.betostar.com/es/euro/operation/getBoostedSelections"
+      ],
+      "market_id": [
+        "POST_https://gw.betostar.com/es/euro/operation/getBoostedSelections"
+      ],
+      "hockey": [
+        "GET_https://gw.betostar.com/es/index/operation/getSportSettings?view=euro"
+      ],
+      "icehockey": [
+        "GET_https://gw.betostar.com/es/index/operation/getSportSettings?view=euro"
+      ]
+    },
+    "consumers": {}
+  },
+  "endpoints": {
+    "GET_https://gw.betostar.com/es/my-combo/operation/getMyComboSettings": {
+      "role": "odds_detail",
+      "volatility": "realtime",
+      "protocol": "https",
+      "method": "GET",
+      "template_url": "https://gw.betostar.com/es/my-combo/operation/getMyComboSettings",
+      "dynamic_parameters": [],
+      "provides_parameters": [
+        "game_period_id",
+        "line_entity_id",
+        "market_key",
+        "market_type_id",
+        "sport_id",
+        "sport_key"
+      ],
+      "curl_command": "curl -X GET \"https://gw.betostar.com/es/my-combo/operation/getMyComboSettings\" -H \"sec-ch-ua-platform: \\\"Windows\\\"\" -H \"referer: https://gw.betostar.com/es/euro/home?sb=logout\" -H \"x-requested-with: XMLHttpRequest\" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\" -H \"accept: application/json, text/plain, */*\" -H \"sec-ch-ua: \\\"Chromium\\\";v=\\\"154\\\", \\\"Google Chrome\\\";v=\\\"154\\\", \\\"Not A(Brand\\\";v=\\\"99\\\"\" -H \"sec-ch-ua-mobile: ?0\"",
+      "handshake_headers": {},
+      "sample_response": {
+        "status": "success",
+        "data": {
+          "default_stake": "105",
+          "min_winnings": "25.0000",
+          "max_winnings": "1000.0000",
+          "winnings_range_step": 25,
+          "odds_range_step": 20,
+          "min_selections": 2,
+          "max_selections": 10,
+          "default_selections": 5,
+          "_truncated_keys": "+1 keys"
+        }
+      }
+    },
+    "POST_https://gw.betostar.com/es/euro/operation/getBoostedSelections": {
+      "role": "fixtures_list",
+      "volatility": "semi_volatile",
+      "protocol": "https",
+      "method": "POST",
+      "template_url": "https://gw.betostar.com/es/euro/operation/getBoostedSelections",
+      "dynamic_parameters": [],
+      "provides_parameters": [
+        "event_id",
+        "market_id",
+        "market_type_id"
+      ],
+      "curl_command": "curl -X POST \"https://gw.betostar.com/es/euro/operation/getBoostedSelections\" -H \"sec-ch-ua-platform: \\\"Windows\\\"\" -H \"referer: https://gw.betostar.com/es/euro/home?sb=logout\" -H \"sec-ch-ua: \\\"Chromium\\\";v=\\\"154\\\", \\\"Google Chrome\\\";v=\\\"154\\\", \\\"Not A(Brand\\\";v=\\\"99\\\"\" -H \"sec-ch-ua-mobile: ?0\" -H \"x-requested-with: XMLHttpRequest\" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\" -H \"accept: application/json, text/plain, */*\"",
+      "handshake_headers": {},
+      "sample_response": {
+        "status": "success",
+        "data": {
+          "1": [
+            "{...}"
+          ]
+        }
+      }
+    },
+    "GET_https://gw.betostar.com/es/index/operation/getSportSettings?view=euro": {
+      "role": "fixtures_list",
+      "volatility": "semi_volatile",
+      "protocol": "https",
+      "method": "GET",
+      "template_url": "https://gw.betostar.com/es/index/operation/getSportSettings?view=euro",
+      "dynamic_parameters": [],
+      "provides_parameters": [
+        "hockey",
+        "icehockey"
+      ],
+      "curl_command": "curl -X GET \"https://gw.betostar.com/es/index/operation/getSportSettings?view=euro\" -H \"sec-ch-ua-platform: \\\"Windows\\\"\" -H \"referer: https://gw.betostar.com/es/euro/home?sb=logout\" -H \"x-requested-with: XMLHttpRequest\" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\" -H \"accept: application/json, text/plain, */*\" -H \"sec-ch-ua: \\\"Chromium\\\";v=\\\"154\\\", \\\"Google Chrome\\\";v=\\\"154\\\", \\\"Not A(Brand\\\";v=\\\"99\\\"\" -H \"sec-ch-ua-mobile: ?0\"",
+      "handshake_headers": {},
+      "sample_response": {
+        "status": "success",
+        "data": {
+          "sport_translations": {
+            "0_0_0_1": "[...]",
+            "0_0_0_2": "[...]",
+            "0_0_0_3": "[...]",
+            "0_0_0_4": "[...]",
+            "0_0_0_5": "[...]",
+            "0_0_0_6": "[...]",
+            "0_0_0_7": "[...]",
+            "0_0_0_8": "[...]",
+            "_truncated_keys": "+8145 keys"
+          },
+          "markets_settings": {
+            "structure": "{...}",
+            "values": "{...}"
+          },
+          "leagues_settings": {
+            "structure": "{...}",
+            "values": "{...}"
+          },
+          "sport_info": {
+            "cards": "{...}",
+            "soccer": "{...}",
+            "tennis": "{...}",
+            "cricket": "{...}",
+            "basketball": "{...}",
+            "baseball": "{...}",
+            "football": "{...}",
+            "esports": "{...}",
+            "_truncated_keys": "+73 keys"
+          },
+          "markets_order": {
+            "18": "{...}"
+          }
+        }
+      }
+    },
+    "GET_https://gw.betostar.com/es/my/operation/getBrandSettings?currency_code=MXN&country_iso_code=mx": {
+      "role": "fixtures_list",
+      "volatility": "semi_volatile",
+      "protocol": "https",
+      "method": "GET",
+      "template_url": "https://gw.betostar.com/es/my/operation/getBrandSettings?currency_code=MXN&country_iso_code=mx",
+      "dynamic_parameters": [],
+      "provides_parameters": [],
+      "curl_command": "curl -X GET \"https://gw.betostar.com/es/my/operation/getBrandSettings?currency_code=MXN&country_iso_code=mx\" -H \"sec-ch-ua-platform: \\\"Windows\\\"\" -H \"referer: https://gw.betostar.com/es/euro/home?sb=logout\" -H \"x-requested-with: XMLHttpRequest\" -H \"user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\" -H \"accept: application/json, text/plain, */*\" -H \"sec-ch-ua: \\\"Chromium\\\";v=\\\"154\\\", \\\"Google Chrome\\\";v=\\\"154\\\", \\\"Not A(Brand\\\";v=\\\"99\\\"\" -H \"sec-ch-ua-mobile: ?0\"",
+      "handshake_headers": {},
+      "sample_response": {
+        "status": "success",
+        "data": {
+          "DOUBLE_MY_WINNINGS": {
+            "is_active": "...",
+            "maximum_allowed_amount_euro": "..."
+          },
+          "TIP_THE_MACHINE": {
+            "is_active": "...",
+            "amounts": "[...]"
+          }
+        }
+      }
+    }
+  },
+  "streaming_endpoints": {},
+  "auxiliary_endpoints": {}
+}

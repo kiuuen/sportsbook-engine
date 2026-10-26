@@ -5,9 +5,13 @@ import pathlib
 import re
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cdp_interceptor import NetworkEvent
+from heuristic_classifier import ClassificationResult
+from database_manager import DatabaseManager
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 class SchemaExporter:
@@ -216,100 +220,108 @@ class SchemaExporter:
 
         return pipeline
 
-    def export_schema(
+    def build_schema_dict(
         self,
         target_url: str,
-        classified_results: List[Any],
+        classified_results: List[ClassificationResult],
         events: List[NetworkEvent],
-    ) -> Optional[pathlib.Path]:
+    ) -> Dict[str, Any]:
+        """
+        Construct the full schema dictionary from captured events and classification results.
+        The returned dict matches the structure expected by DatabaseManager.save_schema_dict.
+        """
+        # Extract target domain
         target_domain = self._extract_domain(target_url, events)
-        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+        # Aggregate session headers and cookies
         session_headers: Dict[str, str] = {}
         session_cookies: Dict[str, str] = {}
-
         for ev in events:
             if ev.request_headers:
-                ess_headers = self._extract_essential_headers(ev.request_headers)
-                session_headers.update(ess_headers)
-                extracted_cookies = self._extract_cookies_from_headers(ev.request_headers)
-                session_cookies.update(extracted_cookies)
+                ess = self._extract_essential_headers(ev.request_headers)
+                session_headers.update(ess)
+                cookies = self._extract_cookies_from_headers(ev.request_headers)
+                session_cookies.update(cookies)
 
+        # Build endpoint dictionaries
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
         streaming_endpoints_dict: Dict[str, Dict[str, Any]] = {}
         auxiliary_endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
         for res in classified_results:
-            sample_ev: Optional[NetworkEvent] = getattr(res, "sample_event", None)
+            sample_ev = getattr(res, "sample_event", None)
             if not sample_ev:
                 continue
-
-            raw_body: Optional[str] = getattr(sample_ev, "response_body", None)
+            raw_body = getattr(sample_ev, "response_body", None)
             if not raw_body:
                 continue
-
             try:
-                parsed_payload: Any = json.loads(raw_body)
+                parsed_payload = json.loads(raw_body)
             except Exception:
                 continue
-
             if not isinstance(parsed_payload, (dict, list)):
                 continue
 
-            is_auxiliary: bool = getattr(res, "is_auxiliary_widget", False)
-            is_viable: bool = getattr(res, "is_viable", False)
-            odds_count: int = getattr(res, "odds_count", 0)
-            score: float = getattr(res, "score", 0.0)
-            role: str = getattr(res, "role", "catalog_root")
-            volatility: str = getattr(res, "volatility", "static")
-            is_websocket: bool = (
+            is_auxiliary = getattr(res, "is_auxiliary_widget", False)
+            is_viable = getattr(res, "is_viable", False)
+            score = getattr(res, "score", 0.0)
+            role = getattr(res, "role", "catalog_root")
+            volatility = getattr(res, "volatility", "static")
+            is_websocket = (
                 sample_ev.resource_type == "WebSocket"
                 or sample_ev.method in ("WS_RECV", "WS_SENT")
             )
 
-            # Core requirements filter vs auxiliary capture
+            # Apply same filtering logic as original export_schema
             if not is_auxiliary:
                 if not is_viable or score < 45.0:
                     continue
                 is_detailed_or_realtime = (role == "odds_detail" or volatility == "realtime")
-                if is_detailed_or_realtime and odds_count < 5 and not is_websocket:
+                if is_detailed_or_realtime and getattr(res, "odds_count", 0) < 5 and not is_websocket:
                     continue
                 if not self._verify_replay_candidate(sample_ev):
                     continue
 
             method = sample_ev.method if sample_ev.method else "GET"
-            req_headers = sample_ev.request_headers if sample_ev.request_headers else session_headers
-            essential_req_headers = self._extract_essential_headers(req_headers)
-            if not essential_req_headers:
-                essential_req_headers = session_headers
-
+            req_headers = sample_ev.request_headers if sample_ev.request_headers else {}
+            essential_req_headers = (
+                self._extract_essential_headers(req_headers) if not is_websocket else {}
+            )
             template_url = getattr(res, "url_template", getattr(res, "url", ""))
-            dynamic_params = sorted(list(set(re.findall(r"\{([^}]+)\}", template_url))))
-            curl_cmd = self._generate_curl(method, getattr(res, "url", ""), essential_req_headers) if not is_websocket else ""
+            dynamic_params = sorted(
+                list(set(re.findall(r"\{([^}]+)\}", template_url)))
+            )
+            curl_cmd = (
+                self._generate_curl(method, getattr(res, "url", ""), essential_req_headers)
+                if not is_websocket
+                else ""
+            )
 
-            sanitized_payload: Any = {}
             try:
-                sanitized_payload = self._summarize_payload(parsed_payload)
-            except Exception as trunc_err:
-                logging.warning(f"Payload summarization error: {trunc_err}")
-                sanitized_payload = {"error": "payload_summarization_failed"}
+                summarized_payload = self._summarize_payload(parsed_payload)
+            except Exception as e:
+                logging.warning(f"Payload summarization error: {e}")
+                summarized_payload = {"error": "payload_summarization_failed"}
 
-            produced_params: List[str] = getattr(res, "produced_params", [])
+            produced_params = getattr(res, "produced_params", [])
 
             endpoint_data = {
                 "role": role,
                 "volatility": volatility,
-                "protocol": "websocket" if is_websocket else ("https" if getattr(sample_ev, "url", "").startswith("https") else "http"),
+                "protocol": (
+                    "websocket"
+                    if is_websocket
+                    else ("https" if getattr(sample_ev, "url", "").startswith("https") else "http")
+                ),
                 "method": method,
                 "template_url": template_url,
                 "dynamic_parameters": dynamic_params,
                 "provides_parameters": produced_params,
                 "curl_command": curl_cmd,
                 "handshake_headers": essential_req_headers if is_websocket else {},
-                "sample_response": sanitized_payload,
+                "sample_response": summarized_payload,
             }
             endpoint_key = f"{method}_{template_url}"
-
             if is_websocket:
                 streaming_endpoints_dict[endpoint_key] = endpoint_data
             elif is_auxiliary:
@@ -317,26 +329,29 @@ class SchemaExporter:
             else:
                 endpoints_dict[endpoint_key] = endpoint_data
 
-        if not endpoints_dict and not streaming_endpoints_dict and not auxiliary_endpoints_dict:
-            print("[!] Schema export aborted: No valid APIs found for this target.")
-            return None
-
-        provider_family = self._infer_provider_family(target_domain, endpoints_dict or streaming_endpoints_dict or auxiliary_endpoints_dict)
+        # Derive provider family and canonical pipeline
+        provider_family = self._infer_provider_family(
+            target_domain,
+            {**endpoints_dict, **streaming_endpoints_dict, **auxiliary_endpoints_dict},
+        )
         canonical_pipeline = self._build_canonical_pipeline(endpoints_dict)
 
+        # Build dependency graph
         producers_map: Dict[str, List[str]] = {}
         consumers_map: Dict[str, List[str]] = {}
-
         for ep_key, ep_val in endpoints_dict.items():
             for param in ep_val.get("provides_parameters", []):
                 producers_map.setdefault(param, []).append(ep_key)
             if ep_val.get("dynamic_parameters"):
                 consumers_map[ep_key] = ep_val["dynamic_parameters"]
 
-        schema_payload = {
+        # Assemble final schema dictionary
+        schema_dict: Dict[str, Any] = {
             "target_domain": target_domain,
             "provider_family": provider_family,
-            "discovered_at": timestamp,
+            "discovered_at": datetime.datetime.utcnow()
+                .replace(tzinfo=datetime.timezone.utc)
+                .isoformat(),
             "session": {
                 "essential_headers": session_headers,
                 "cookies": session_cookies,
@@ -351,8 +366,177 @@ class SchemaExporter:
             "auxiliary_endpoints": auxiliary_endpoints_dict,
         }
 
+        return schema_dict
+
+    def export_schema(
+        self,
+        target_url: str,
+        classified_results: List[ClassificationResult],
+        events: List[NetworkEvent],
+        db_manager: Optional[DatabaseManager] = None,
+    ) -> Tuple[pathlib.Path, Optional[int]]:
+        """
+        Export the discovered schema to a JSON file and optionally persist it in SQLite.
+        Returns a tuple of (json_path, target_id). target_id is None if db_manager is not provided.
+        """
+        schema_dict = self.build_schema_dict(target_url, classified_results, events)
+
+        target_domain = schema_dict["target_domain"]
         output_file = self.output_dir / f"{target_domain}.json"
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(schema_payload, f, indent=2)
+            json.dump(schema_dict, f, indent=2)
 
-        return output_file
+        target_id: Optional[int] = None
+        if db_manager is not None:
+            target_id = db_manager.save_schema_dict(schema_dict)
+
+        return output_file, target_id
+
+if __name__ == "__main__":
+    import asyncio
+
+    async def run_live_test_harness() -> None:
+        print("\n=======================================================")
+        print("  LIVE SPORTSBOOK API HEURISTIC CLASSIFIER HARNESS")
+        print("=======================================================\n")
+
+        target_url = input("Enter target sportsbook URL (or press Enter for blank): ").strip()
+        if target_url and not target_url.startswith(("http://", "https://")):
+            target_url = "https://" + target_url
+
+        classifier = HeuristicClassifier("sportsbook_lexicon.json")
+        orchestrator = ChromeOrchestrator(
+            profile_name="heuristic_harness_profile", port=9222, headless=False
+        )
+
+        print("[*] Launching browser instance...")
+        orchestrator.start(timeout=15.0, initial_url=target_url if target_url else None)
+
+        try:
+            ws_url = orchestrator.get_cdp_url(target_url=target_url if target_url else None)
+            print(f"[+] CDP WebSocket URL acquired: {ws_url}")
+
+            interceptor = CDPNetworkInterceptor(cdp_ws_url=ws_url)
+            await interceptor.start()
+
+            print("\n-------------------------------------------------------")
+            print("OPERATOR ACTION REQUIRED:")
+            print("1. Chrome has opened.")
+            print("2. Navigate to any sportsbook site (e.g., live events, markets).")
+            print("3. Interact with odds/fixtures on the page.")
+            print("4. Return here and press ENTER when ready to evaluate captured traffic.")
+            print("-------------------------------------------------------\n")
+
+            await asyncio.to_thread(
+                input, "--> Press ENTER to stop capturing and evaluate candidate endpoints... <--\n"
+            )
+
+            print("[*] Draining pending in-flight network requests...")
+            await asyncio.sleep(2.0)
+
+            events = interceptor.get_captured_events()
+            await interceptor.stop()
+
+            print(f"[*] Interception complete. Total network events captured: {len(events)}")
+            print("[*] Grouping events by deduced route templates & scoring...\n")
+
+            # Group events by deduced route template
+            template_groups: Dict[str, List[NetworkEvent]] = {}
+            for ev in events:
+                if ev.response_body:
+                    tmpl = RouteTemplateDeducer.deduce_template(ev.url)
+                    template_groups.setdefault(tmpl, []).append(ev)
+
+            results: List[ClassificationResult] = []
+            for tmpl, group_events in template_groups.items():
+                call_count = len(group_events)
+                timestamps = [e.timestamp for e in group_events]
+                time_span = max(timestamps) - min(timestamps) if len(timestamps) > 1 else 0.0
+                sample_event = group_events[0]
+
+                res = classifier.score_payload(
+                    url=sample_event.url,
+                    payload_str=sample_event.response_body or "",
+                    call_count=call_count,
+                    time_span_seconds=time_span,
+                    sample_event=sample_event,
+                )
+                if res.is_viable or res.is_grey_zone:
+                    results.append(res)
+
+            results.sort(
+                key=lambda r: (r.score, r.core_betting_matches, r.odds_count, r.call_count),
+                reverse=True,
+            )
+
+            print("=======================================================")
+            print("         SCORED CANDIDATE ENDPOINTS SUMMARY            ")
+            print("=======================================================")
+
+            if not results:
+                print("[-] No sportsbook API candidate endpoints detected in captured traffic.")
+            else:
+                for idx, res in enumerate(results[:15], start=1):
+                    print(f"\n[{idx}] Score: {res.score}/100 | Calls: {res.call_count} | TimeSpan: {res.time_span_seconds}s | Odds Detected: {res.odds_count}")
+                    print(f"    Raw Sample URL: {res.url}")
+                    print(f"    Deduced Template: {res.url_template}")
+                    if res.matched_keywords:
+                        print(f"    Matched Terms: {', '.join(sorted(res.matched_keywords)[:8])}")
+                    if res.is_grey_zone:
+                        print(f"    [!] GREY ZONE DETECTED - Candidate terms: {res.ambiguous_keys[:5]}")
+
+                # Execute Automated Replay Probe for top candidate with odds_count >= 5
+                eligible_candidates = [r for r in results if r.odds_count >= 5]
+                if eligible_candidates:
+                    top_candidate = eligible_candidates[0]
+                    if top_candidate.sample_event:
+                        print("\n=======================================================")
+                        print("     AUTOMATED STANDALONE REPLAY PROBE (TOP ENDPOINT)   ")
+                        print("=======================================================")
+                        print(f"[*] Executing headless HTTP replay for: {top_candidate.url}")
+
+                        success, msg, headers_used, json_preview = AutomatedReplayProber.replay_candidate_endpoint(
+                            top_candidate.sample_event
+                        )
+
+                        print(f"[+] Replay Verification Result: {'SUCCESS' if success else 'FAILED'}")
+                        print(f"    Message: {msg}")
+                        print(f"    Final Parameterized Template: {top_candidate.url_template}")
+                        print("    Minimal Required Headers:")
+                        for h_k, h_v in list(headers_used.items())[:6]:
+                            print(f"      - {h_k}: {h_v}")
+
+                        if success and json_preview:
+                            print("\n    JSON Payload Preview (5 lines):")
+                            for line in json_preview.splitlines():
+                                print(f"      {line}")
+                else:
+                    print("\n[-] No candidate endpoint met the minimum odds threshold (odds_count >= 5) for replay probe.")
+
+                # Execute Guarded Post-Discovery Noise Assistant for residual traffic
+                NoiseAssistant.process_noise_domains(
+                    events=events,
+                    classified_results=results,
+                    target_url=target_url,
+                )
+
+                # Export validated blueprint schema to JSON file
+                try:
+                    exporter = SchemaExporter()
+                    export_path, target_id = exporter.export_schema(
+                        target_url=target_url,
+                        classified_results=results,
+                        events=events,
+                    )
+                    if export_path is not None:
+                        print(f"\n[+] Schema successfully exported to: {export_path.resolve()}")
+                except Exception as err:
+                    logging.error(f"[Exporter Error] Failed to export schema: {err}", exc_info=True)
+
+            print("\n=======================================================\n")
+
+        finally:
+            print("[*] Terminating Chrome orchestrator process...")
+            orchestrator.stop()
+
+    asyncio.run(run_live_test_harness())

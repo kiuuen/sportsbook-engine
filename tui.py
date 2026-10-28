@@ -560,10 +560,11 @@ class TUITerminal:
         )
 
     def _setup_logging_handler(self) -> None:
-        """Route all log records into the in-memory log buffer.
+        """Route log records into the on-screen buffer and the persistent log file.
 
-        The default stream handler installed at import time is removed so
-        that log output never garbles the live-rendered display.
+        The on-screen buffer receives short single-line messages without
+        tracebacks, while the file handler records complete messages and
+        exception tracebacks for later inspection.
         """
 
         class LogBufferHandler(logging.Handler):
@@ -573,7 +574,10 @@ class TUITerminal:
 
             def emit(self, record: logging.LogRecord) -> None:
                 try:
-                    self._buffer.add(record.levelname, self.format(record))
+                    timestamp = datetime.datetime.fromtimestamp(record.created).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    self._buffer.add(record.levelname, f"{timestamp} {record.getMessage()}")
                 except Exception:
                     self.handleError(record)
 
@@ -582,11 +586,14 @@ class TUITerminal:
             root_logger.removeHandler(existing_handler)
 
         handler = LogBufferHandler(self.log_buffer)
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        )
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         root_logger.addHandler(handler)
         root_logger.setLevel(logging.INFO)
+
+        self._file_log_handler = self._create_file_log_handler()
+        if self._file_log_handler is not None:
+            root_logger.addHandler(self._file_log_handler)
 
     def _render_header(self) -> RenderableType:
         """Render the header section."""
@@ -682,7 +689,11 @@ class TUITerminal:
         endpoint_table.add_column("Volatility", style="yellow")
         endpoint_table.add_column("Method", style="blue")
 
-        endpoints = self.db_manager.get_endpoints_by_target_id(target_id)
+        try:
+            endpoints = self.db_manager.get_endpoints_by_target_id(target_id)
+        except Exception as err:
+            logger.error(f"Failed to load endpoints for {selected_domain}: {err}")
+            endpoints = []
         if endpoints:
             for ep in endpoints:
                 endpoint_table.add_row(
@@ -701,7 +712,11 @@ class TUITerminal:
         activity_table.add_column("Status", style="green")
         activity_table.add_column("Message", style="yellow")
 
-        logs = self.db_manager.get_recent_replay_logs(target_id, limit=10)
+        try:
+            logs = self.db_manager.get_recent_replay_logs(target_id, limit=10)
+        except Exception as err:
+            logger.error(f"Failed to load replay logs for {selected_domain}: {err}")
+            logs = []
         if logs:
             for log in logs:
                 activity_table.add_row(
@@ -755,7 +770,7 @@ class TUITerminal:
             "[cyan]Up/Down[/cyan] highlight   [cyan]Enter[/cyan] select   "
             "[cyan]d[/cyan] discover   [cyan]t[/cyan] test endpoint   "
             "[cyan]r[/cyan] refresh session   [cyan]p[/cyan] pipeline   "
-            "[cyan]h[/cyan] help   [cyan]q[/cyan] quit"
+            "[cyan]x[/cyan] delete target   [cyan]h[/cyan] help   [cyan]q[/cyan] quit"
         )
         return Panel(
             Align(footer_text, align="center"),
@@ -778,6 +793,7 @@ class TUITerminal:
                 "[cyan]t[/cyan]   Test an endpoint (prompts for domain and endpoint key)",
                 "[cyan]r[/cyan]   Refresh the session for a target",
                 "[cyan]p[/cyan]   Start or stop the ingestion pipeline for a target",
+                "[cyan]x[/cyan]   Delete a target (removes database records and the exported schema)",
                 "[cyan]h[/cyan]   Toggle this help view",
                 "[cyan]q[/cyan]   Quit the control panel",
                 "",

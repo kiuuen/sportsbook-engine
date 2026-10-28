@@ -2,6 +2,7 @@ import json
 import logging
 import pathlib
 import re
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,68 +16,152 @@ from schema_exporter import SchemaExporter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+class ReplayExecutionError(RuntimeError):
+    """Raised when a replay request fails for a cause that was already logged."""
+
 class ReplayExecutor:
+
+    @staticmethod
+    def _lookup_value(source: Any, *keys: str) -> Any:
+        """Return the first non-null value for ``keys`` from a mapping-like object."""
+        if source is None:
+            return None
+        for key in keys:
+            value: Any = None
+            try:
+                if isinstance(source, dict):
+                    value = source.get(key)
+                else:
+                    value = source[key]
+            except (KeyError, IndexError, TypeError):
+                value = None
+            except Exception:
+                value = None
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _coerce_json_value(raw: Any, default: Any) -> Any:
+        """Decode JSON text when required, returning ``default`` on failure."""
+        if raw is None:
+            return default
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return default
+        return raw
+
+    @classmethod
+    def _coerce_mapping(cls, raw: Any) -> Dict[str, Any]:
+        """Return a dictionary view of a raw mapping or JSON object payload."""
+        value = cls._coerce_json_value(raw, {})
+        return dict(value) if isinstance(value, dict) else {}
+
+    @classmethod
+    def _coerce_list(cls, raw: Any) -> List[Any]:
+        """Return a list view of a raw sequence or JSON array payload."""
+        value = cls._coerce_json_value(raw, [])
+        return list(value) if isinstance(value, list) else []
 
     def __init__(
         self,
         schema_source: Union[str, pathlib.Path, int],
         db_manager: Optional[DatabaseManager] = None,
     ) -> None:
-        # Store db_manager for later health logging; create default if none provided
         self.db_manager = db_manager
-        if isinstance(schema_source, pathlib.Path):
-            source_path = schema_source
-        else:
-            source_path = pathlib.Path(schema_source)
+        self.target_id: Optional[int] = None
+        self.schema_path: Optional[pathlib.Path] = None
+        self.schema_data: Dict[str, Any] = {}
+        self.target_domain = "unknown_target"
+        self.session_headers: Dict[str, str] = {}
+        self.session_cookies: Dict[str, str] = {}
+        self.endpoints: Dict[str, Dict[str, Any]] = {}
+        self.dependency_graph: Dict[str, Any] = {}
 
-        # Case 1: existing JSON file
-        if source_path.is_file():
-            self.schema_path = source_path
-            # Original JSON loading logic (unchanged)
-            try:
-                with open(self.schema_path, "r", encoding="utf-8") as f:
-                    self.schema_data = json.load(f)
-            except Exception as err:
-                raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
-
-            # Derive attributes used later
-            self.target_domain = self.schema_data.get("target_domain", "unknown_target")
-            self.session_headers = self.schema_data.get("session", {}).get("essential_headers", {})
-            self.session_cookies = self.schema_data.get("session", {}).get("cookies", {})
-            self.endpoints = self.schema_data.get("endpoints", {})
-            self.dependency_graph = self.schema_data.get("dependency_graph", {})
+        # Case 1: an explicit target identifier.
+        if isinstance(schema_source, int) and not isinstance(schema_source, bool):
+            if not self.db_manager:
+                self.db_manager = DatabaseManager(db_path="./data/control_plane.db")
+            self._load_from_db(int(schema_source))
             return
 
-        # Cases 2 & 3: domain string or target_id integer – require DatabaseManager
+        source_path = pathlib.Path(schema_source)
+
+        # Case 2: an existing JSON schema file.
+        if source_path.is_file():
+            self.schema_path = source_path
+            try:
+                with open(self.schema_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception as err:
+                raise RuntimeError(
+                    f"Failed to parse schema JSON file at {self.schema_path}: {err}"
+                ) from err
+            if not isinstance(loaded, dict):
+                raise RuntimeError(
+                    f"Schema JSON file at {self.schema_path} must contain a JSON object."
+                )
+            self.schema_data = loaded
+            self._apply_schema_data()
+            self._link_to_database_target()
+            return
+
+        # Case 3: a domain name or a numeric target identifier.
         if not self.db_manager:
             self.db_manager = DatabaseManager(db_path="./data/control_plane.db")
 
-        # Try interpreting source as an integer target_id
-        try:
-            target_id = int(schema_source)
-            self._load_from_db(target_id)
+        domain_source = str(schema_source).strip()
+        if domain_source.isdigit():
+            self._load_from_db(int(domain_source))
             return
-        except ValueError:
-            # Not an integer – treat as domain string
-            pass
 
-        # Domain lookup
-        target = self.db_manager.get_target_by_domain(schema_source)
+        target = self.db_manager.get_target_by_domain(domain_source)
         if not target:
-            raise ValueError(f"Target domain '{schema_source}' not found in database.")
-        self._load_from_db(target["id"])
+            raise ValueError(f"Target domain '{domain_source}' not found in database.")
+        self._load_from_db(int(target["id"]))
+
+    def _apply_schema_data(self) -> None:
+        """Populate executor attributes from the current schema dictionary."""
+        self.target_domain = str(self.schema_data.get("target_domain", "unknown_target"))
+        session_data = self.schema_data.get("session", {})
+        self.session_headers = self._coerce_mapping(
+            self._lookup_value(session_data, "essential_headers", "essential_headers_json")
+        )
+        self.session_cookies = self._coerce_mapping(
+            self._lookup_value(session_data, "cookies", "cookies_json")
+        )
+        endpoints = self.schema_data.get("endpoints", {})
+        self.endpoints = endpoints if isinstance(endpoints, dict) else {}
+        dependency_graph = self.schema_data.get("dependency_graph", {})
+        self.dependency_graph = dependency_graph if isinstance(dependency_graph, dict) else {}
+
+    def _link_to_database_target(self) -> None:
+        """Associate a file-based schema with its database target when possible."""
+        if self.db_manager is None:
+            return
+        try:
+            target = self.db_manager.get_target_by_domain(self.target_domain)
+            if target:
+                self.target_id = int(target["id"])
+        except Exception as err:
+            logging.warning(
+                f"[ReplayExecutor] Failed to resolve database target for "
+                f"'{self.target_domain}': {err}"
+            )
 
     def _load_from_db(self, target_id: int) -> None:
-        """
-        Populate the ReplayExecutor from the SQLite control plane using the given target_id.
-        Raises ValueError if the target does not exist.
-        """
         if not self.db_manager:
             raise RuntimeError("DatabaseManager not provided for DB loading.")
 
-        # Fetch target record
         conn = self.db_manager.get_connection()
-        row = conn.execute("SELECT * FROM targets WHERE id = ?", (target_id,)).fetchone()
+        try:
+            row = conn.execute("SELECT * FROM targets WHERE id = ?", (target_id,)).fetchone()
+        except sqlite3.Error as err:
+            raise RuntimeError(
+                f"Failed to read target {target_id} from the database: {err}"
+            ) from err
         if not row:
             raise ValueError(f"Target with id {target_id} not found.")
         target_row = dict(row)
@@ -84,56 +169,51 @@ class ReplayExecutor:
         target_domain = target_row["domain"]
         provider_family = target_row["provider_family"]
         discovered_at = target_row["discovered_at"]
-        # canonical_pipeline_json is not needed for ReplayExecutor
 
-        # Fetch session
+        # Session data may be exposed as parsed dictionaries or raw JSON text.
         session_row = self.db_manager.get_session_by_target_id(target_id)
-        session_headers: Dict[str, str] = {}
-        session_cookies: Dict[str, str] = {}
-        if session_row:
-            raw_headers = session_row.get("essential_headers")
-            if raw_headers is None:
-                raw_headers = session_row.get("essential_headers_json", {})
-            if isinstance(raw_headers, str):
-                session_headers = json.loads(raw_headers)
-            elif isinstance(raw_headers, dict):
-                session_headers = raw_headers
+        session_headers = self._coerce_mapping(
+            self._lookup_value(session_row, "essential_headers", "essential_headers_json")
+        )
+        session_cookies = self._coerce_mapping(
+            self._lookup_value(session_row, "cookies", "cookies_json")
+        )
 
-            raw_cookies = session_row.get("cookies")
-            if raw_cookies is None:
-                raw_cookies = session_row.get("cookies_json", {})
-            if isinstance(raw_cookies, str):
-                session_cookies = json.loads(raw_cookies)
-            elif isinstance(raw_cookies, dict):
-                session_cookies = raw_cookies
-
-        # Fetch endpoints
         endpoint_rows = self.db_manager.get_endpoints_by_target_id(target_id)
         endpoints_dict: Dict[str, Dict[str, Any]] = {}
         for ep in endpoint_rows:
-            ep_key = ep["endpoint_key"]
-            endpoint_info = {
-                "role": ep["role"],
-                "volatility": ep["volatility"],
-                "protocol": ep["protocol"],
-                "method": ep["method"],
-                "template_url": ep["template_url"],
-                "dynamic_parameters": json.loads(ep["dynamic_parameters_json"]),
-                "provides_parameters": json.loads(ep["provides_parameters_json"]),
-                "curl_command": ep["curl_command"],
-                "handshake_headers": json.loads(ep["handshake_headers_json"]),
-                "sample_response": json.loads(ep["sample_response_json"]),
+            ep_key = str(self._lookup_value(ep, "endpoint_key") or "")
+            if not ep_key:
+                continue
+            endpoints_dict[ep_key] = {
+                "role": self._lookup_value(ep, "role") or "catalog_root",
+                "volatility": self._lookup_value(ep, "volatility") or "static",
+                "protocol": self._lookup_value(ep, "protocol") or "https",
+                "method": self._lookup_value(ep, "method") or "GET",
+                "template_url": self._lookup_value(ep, "template_url") or "",
+                "dynamic_parameters": self._coerce_list(
+                    self._lookup_value(ep, "dynamic_parameters", "dynamic_parameters_json")
+                ),
+                "provides_parameters": self._coerce_list(
+                    self._lookup_value(ep, "provides_parameters", "provides_parameters_json")
+                ),
+                "curl_command": self._lookup_value(ep, "curl_command") or "",
+                "handshake_headers": self._coerce_mapping(
+                    self._lookup_value(ep, "handshake_headers", "handshake_headers_json")
+                ),
+                "sample_response": self._coerce_json_value(
+                    self._lookup_value(ep, "sample_response", "sample_response_json"), {}
+                ),
             }
-            # If duplicate keys exist, the last one wins – acceptable for this use-case
-            endpoints_dict[ep_key] = endpoint_info
 
-        # Fetch dependency graph
         dep_row = self.db_manager.get_dependency_graph_by_target_id(target_id)
-        producers = json.loads(dep_row["producers_json"]) if dep_row else {}
-        consumers = json.loads(dep_row["consumers_json"]) if dep_row else {}
-        dependency_graph = {"producers": producers, "consumers": consumers}
+        producers = self._coerce_mapping(
+            self._lookup_value(dep_row, "producers", "producers_json")
+        )
+        consumers = self._coerce_mapping(
+            self._lookup_value(dep_row, "consumers", "consumers_json")
+        )
 
-        # Build schema_data dict matching the structure used by DatabaseManager.save_schema_dict
         self.schema_data = {
             "target_domain": target_domain,
             "provider_family": provider_family,
@@ -143,18 +223,11 @@ class ReplayExecutor:
                 "cookies": session_cookies,
             },
             "endpoints": endpoints_dict,
-            "dependency_graph": dependency_graph,
+            "dependency_graph": {"producers": producers, "consumers": consumers},
         }
 
-        # Store target_id for health-logging
         self.target_id = target_id
-
-        # Initialise other attributes used by the original implementation
-        self.target_domain = target_domain
-        self.session_headers = session_headers
-        self.session_cookies = session_cookies
-        self.endpoints = endpoints_dict
-        self.dependency_graph = dependency_graph
+        self._apply_schema_data()
 
     def _log_health(
         self,
@@ -168,7 +241,7 @@ class ReplayExecutor:
         Record a health/probe outcome in replay_health_logs if a DatabaseManager
         and target_id are available. Errors are logged but not propagated.
         """
-        if not self.db_manager or not hasattr(self, "target_id"):
+        if not self.db_manager or self.target_id is None:
             return
         try:
             self.db_manager.log_replay_health(
@@ -207,10 +280,19 @@ class ReplayExecutor:
             raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
 
     def _build_request_headers(self) -> Dict[str, str]:
-        headers: Dict[str, str] = {k.lower(): v for k, v in self.session_headers.items() if not k.startswith(":")}
+        headers: Dict[str, str] = {}
+        for key, value in self.session_headers.items():
+            if not isinstance(key, str) or key.startswith(":") or value is None:
+                continue
+            headers[key.lower()] = str(value)
         if self.session_cookies:
-            cookie_str = "; ".join(f"{k}={v}" for k, v in self.session_cookies.items())
-            headers["cookie"] = cookie_str
+            cookie_pairs = [
+                f"{key}={value}"
+                for key, value in self.session_cookies.items()
+                if key is not None and value is not None
+            ]
+            if cookie_pairs:
+                headers["cookie"] = "; ".join(cookie_pairs)
         return headers
 
     def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -431,9 +513,9 @@ class ReplayExecutor:
                 message=f"HTTP error during execution: {http_err.code} {http_err.reason}",
                 response_preview="",
             )
-            raise RuntimeError(
-                f"HTTP error occurred during execution: {http_err.code} {http_err.reason}"
-            ) from http_err
+            raise ReplayExecutionError(
+                f"HTTP request failed with status code {status_code}"
+            )
 
         except Exception as err:
             self._log_health(

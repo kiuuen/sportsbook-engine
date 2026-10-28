@@ -47,6 +47,21 @@ class DatabaseManager:
     def _utc_now_iso() -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+    @staticmethod
+    def _safe_json_loads(raw: Any, default: Any) -> Any:
+        """Decode a stored JSON payload without raising on malformed data."""
+        if raw is None:
+            return default
+        if isinstance(raw, (dict, list)):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError) as err:
+                logging.warning(f"[DB] Failed to decode stored JSON payload: {err}")
+                return default
+        return default
+
     def _init_db(self) -> None:
         conn = self.get_connection()
         with conn:
@@ -281,11 +296,13 @@ class DatabaseManager:
 
     def get_target_by_domain(self, domain: str) -> Optional[Dict[str, Any]]:
         conn = self.get_connection()
-        row = conn.execute("SELECT * FROM targets WHERE domain = ?", (domain,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM targets WHERE LOWER(domain) = LOWER(?)", (domain,)
+        ).fetchone()
         if not row:
             return None
         res = dict(row)
-        res["canonical_pipeline"] = json.loads(res["canonical_pipeline_json"])
+        res["canonical_pipeline"] = self._safe_json_loads(res.get("canonical_pipeline_json"), {})
         return res
 
     def get_session_by_target_id(self, target_id: int) -> Optional[Dict[str, Any]]:
@@ -296,8 +313,8 @@ class DatabaseManager:
         return {
             "id": row["id"],
             "target_id": row["target_id"],
-            "essential_headers": json.loads(row["essential_headers_json"]),
-            "cookies": json.loads(row["cookies_json"]),
+            "essential_headers": self._safe_json_loads(row["essential_headers_json"], {}),
+            "cookies": self._safe_json_loads(row["cookies_json"], {}),
             "updated_at": row["updated_at"],
         }
 
@@ -327,11 +344,11 @@ class DatabaseManager:
                 "protocol": r["protocol"],
                 "method": r["method"],
                 "template_url": r["template_url"],
-                "dynamic_parameters": json.loads(r["dynamic_parameters_json"]),
-                "provides_parameters": json.loads(r["provides_parameters_json"]),
+                "dynamic_parameters": self._safe_json_loads(r["dynamic_parameters_json"], []),
+                "provides_parameters": self._safe_json_loads(r["provides_parameters_json"], []),
                 "curl_command": r["curl_command"],
-                "handshake_headers": json.loads(r["handshake_headers_json"]),
-                "sample_response": json.loads(r["sample_response_json"]),
+                "handshake_headers": self._safe_json_loads(r["handshake_headers_json"], {}),
+                "sample_response": self._safe_json_loads(r["sample_response_json"], {}),
                 "updated_at": r["updated_at"],
             })
         return results
@@ -344,8 +361,8 @@ class DatabaseManager:
         return {
             "id": row["id"],
             "target_id": row["target_id"],
-            "producers": json.loads(row["producers_json"]),
-            "consumers": json.loads(row["consumers_json"]),
+            "producers": self._safe_json_loads(row["producers_json"], {}),
+            "consumers": self._safe_json_loads(row["consumers_json"], {}),
             "updated_at": row["updated_at"],
         }
 
@@ -358,6 +375,47 @@ class DatabaseManager:
         message: str,
         response_preview: str = "",
     ) -> int:
+
+    def delete_target(self, domain: str) -> bool:
+        """Delete a target and every record associated with it.
+
+        Child rows are removed explicitly so the operation is correct even if
+        SQLite foreign-key enforcement is unavailable, in addition to the
+        ``ON DELETE CASCADE`` clauses declared on the schema.
+
+        Args:
+            domain: Domain of the target to remove.
+
+        Returns:
+            True when a target was deleted, False when the domain is unknown.
+        """
+        if not isinstance(domain, str):
+            return False
+        normalized = domain.strip().lower()
+        if not normalized:
+            return False
+
+        conn = self.get_connection()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM targets WHERE LOWER(domain) = ?", (normalized,)
+                ).fetchone()
+                if row is None:
+                    return False
+                target_id = int(row["id"])
+                conn.execute("DELETE FROM replay_health_logs WHERE target_id = ?", (target_id,))
+                conn.execute("DELETE FROM dependency_graphs WHERE target_id = ?", (target_id,))
+                conn.execute("DELETE FROM endpoints WHERE target_id = ?", (target_id,))
+                conn.execute("DELETE FROM sessions WHERE target_id = ?", (target_id,))
+                conn.execute("DELETE FROM targets WHERE id = ?", (target_id,))
+            logging.info(
+                f"[DB] Deleted target '{normalized}' (id={target_id}) and all associated records."
+            )
+            return True
+        except sqlite3.Error as err:
+            logging.error(f"[DB] Failed to delete target '{normalized}': {err}")
+            return False
         conn = self.get_connection()
         now = self._utc_now_iso()
         query = """

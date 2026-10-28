@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Any, Coroutine, Deque, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Coroutine, Deque, Dict, List, Optional, Tuple
 
 from rich import box
 from rich.align import Align
@@ -249,13 +249,18 @@ class TUITargetManager:
                 "executed_at": last_log["executed_at"],
             }
 
-    async def discover_new_target(self, url: str, capture_seconds: float = 5.0) -> bool:
+    async def discover_new_target(
+        self,
+        url: str,
+        prompt_cb: Optional[Callable[[str], Awaitable[str]]] = None,
+    ) -> bool:
         """Discover a new target by capturing live traffic and classifying endpoints.
 
         Args:
             url: URL of the site to discover. A scheme is added automatically
                 when missing.
-            capture_seconds: Number of seconds to capture network traffic.
+            prompt_cb: Optional async callback function to prompt the operator and
+                pause the display.
 
         Returns:
             True when a schema was discovered and exported, False otherwise.
@@ -270,7 +275,7 @@ class TUITargetManager:
             orchestrator = ChromeOrchestrator(
                 profile_name="tui_discovery_profile",
                 port=9222,
-                headless=True,
+                headless=False,
             )
             await asyncio.to_thread(
                 orchestrator.start, timeout=15.0, initial_url=url
@@ -286,7 +291,13 @@ class TUITargetManager:
             interceptor = CDPNetworkInterceptor(cdp_ws_url=ws_url)
             await interceptor.start()
 
-            await asyncio.sleep(capture_seconds)
+            prompt_msg = (
+                "Interact with the target in Chrome, then press Enter to analyze traffic..."
+            )
+            if prompt_cb is not None:
+                await prompt_cb(prompt_msg)
+            else:
+                await asyncio.to_thread(input, prompt_msg + "\n")
 
             events = interceptor.get_captured_events()
 
@@ -319,10 +330,11 @@ class TUITargetManager:
                 return False
 
             exporter = SchemaExporter()
-            saved_path = exporter.export_schema(
+            saved_path, target_id = exporter.export_schema(
                 target_url=url,
                 classified_results=results,
                 events=events,
+                db_manager=self.db_manager,
             )
             if saved_path is None:
                 logger.warning(
@@ -330,7 +342,9 @@ class TUITargetManager:
                 )
                 return False
 
-            logger.info(f"Successfully discovered and exported schema for: {url}")
+            logger.info(
+                f"Successfully discovered and exported schema for: {url} (target_id: {target_id})"
+            )
             self.reload_targets()
             return True
 
@@ -924,8 +938,13 @@ class TUITerminal:
                         live, "Enter target URL to discover (empty to cancel)"
                     )
                     if url:
+                        async def _prompt_wrapper(prompt_text: str) -> str:
+                            return await self._prompt(live, prompt_text)
+
                         self.task_manager.add_task(
-                            self.target_manager.discover_new_target(url)
+                            self.target_manager.discover_new_target(
+                                url, prompt_cb=_prompt_wrapper
+                            )
                         )
                     continue
 

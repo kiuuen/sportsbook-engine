@@ -88,8 +88,24 @@ class ReplayExecutor:
 
         # Fetch session
         session_row = self.db_manager.get_session_by_target_id(target_id)
-        session_headers = json.loads(session_row["essential_headers_json"]) if session_row else {}
-        session_cookies = json.loads(session_row["cookies_json"]) if session_row else {}
+        session_headers: Dict[str, str] = {}
+        session_cookies: Dict[str, str] = {}
+        if session_row:
+            raw_headers = session_row.get("essential_headers")
+            if raw_headers is None:
+                raw_headers = session_row.get("essential_headers_json", {})
+            if isinstance(raw_headers, str):
+                session_headers = json.loads(raw_headers)
+            elif isinstance(raw_headers, dict):
+                session_headers = raw_headers
+
+            raw_cookies = session_row.get("cookies")
+            if raw_cookies is None:
+                raw_cookies = session_row.get("cookies_json", {})
+            if isinstance(raw_cookies, str):
+                session_cookies = json.loads(raw_cookies)
+            elif isinstance(raw_cookies, dict):
+                session_cookies = raw_cookies
 
         # Fetch endpoints
         endpoint_rows = self.db_manager.get_endpoints_by_target_id(target_id)

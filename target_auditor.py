@@ -39,8 +39,6 @@ class TargetAuditor:
 
     # URL keywords identifying real fixture endpoints.
     FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
-    # URL keywords identifying real fixture endpoints.
-    FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
     # URL/key keywords that indicate genuine match/market endpoints.
     MATCH_URL_KEYWORDS = ("event", "match", "fixture", "game", "market", "odds")
     # Dict keys whose numeric values are genuine odds (leaf context).

@@ -40,6 +40,28 @@ class TargetAuditor:
     FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
     # URL keywords identifying configuration/system endpoints to ignore.
     EXCLUDED_URL_KEYWORDS = ("params", "settings", "translations", "auth")
+    # Endpoint-key/role keywords identifying configuration/system endpoints.
+    EXCLUDED_KEY_KEYWORDS = (
+        "param", "setting", "config", "system", "default", "translation",
+        "auth", "login", "session", "metadata", "permission", "preference",
+        "feature", "banner", "menu", "navigation",
+    )
+    # URL/key keywords that indicate genuine match/market endpoints.
+    MATCH_URL_KEYWORDS = ("event", "match", "fixture", "game", "market", "odds")
+    # Dict keys whose numeric values are genuine odds (leaf context).
+    ODDS_VALUE_KEYS = ("odds", "price", "decimal", "back", "lay", "payout")
+    # Dict keys that establish a betting-market context.
+    MARKET_CONTEXT_KEYS = (
+        "market", "markets", "selection", "selections", "outcome", "outcomes",
+        "runner", "runners", "bet", "bets", "line", "lines", "bookmaker",
+        "bookmakers", "odds", "price", "pick", "picks",
+    )
+    # Dict keys that establish a match/fixture entity (distinct competitors).
+    COMPETITOR_KEYS = (
+        "home", "away", "guest", "visitor", "host", "competitors",
+        "participants", "teams", "team1", "team2", "home_team", "away_team",
+        "hometeam", "awayteam", "player1", "player2", "opponent",
+    )
 
     def __init__(
         self,
@@ -67,9 +89,24 @@ class TargetAuditor:
         if not self.endpoints:
             raise RuntimeError(f"Target {target_id} has no endpoints in its schema.")
 
+    def _is_excluded_endpoint(self, key: str, info: Dict[str, Any]) -> bool:
+        """Return True for configuration/system endpoints that must be ignored."""
+        url = self._get_endpoint_url(info)
+        key_l = key.lower()
+        role = str(info.get("role", "")).lower()
+        if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
+            return True
+        if any(ex in key_l for ex in self.EXCLUDED_KEY_KEYWORDS):
+            return True
+        if any(ex in role for ex in self.EXCLUDED_KEY_KEYWORDS):
+            return True
+        return False
+
     def _find_endpoint_by_roles(self, roles: Set[str]) -> Optional[str]:
-        """Return the first endpoint key whose role is in the given set."""
+        """Return the first non-excluded endpoint key whose role is in the given set."""
         for key, info in self.endpoints.items():
+            if self._is_excluded_endpoint(key, info):
+                continue
             if info.get("role") in roles:
                 return key
         return None
@@ -91,32 +128,39 @@ class TargetAuditor:
     def _find_fixtures_endpoint(self) -> Optional[str]:
         """Return a real fixtures endpoint, prioritizing URL keyword matches
         and explicitly ignoring configuration/system endpoints."""
+        candidates = [
+            k for k in self.endpoints
+            if not self._is_excluded_endpoint(k, self.endpoints[k])
+        ]
         # Priority 1: real fixture endpoints identified by URL keywords.
-        for k, info in self.endpoints.items():
-            url = self._get_endpoint_url(info)
-            if not url:
-                continue
-            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
-                continue
-            if any(kw in url for kw in self.FIXTURE_URL_KEYWORDS):
+        for k in candidates:
+            if any(kw in self._get_endpoint_url(self.endpoints[k]) for kw in self.FIXTURE_URL_KEYWORDS):
                 return k
-
-        # Priority 2: role-based match, still excluding config/system endpoints.
-        for k, info in self.endpoints.items():
-            url = self._get_endpoint_url(info)
-            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
-                continue
-            if info.get("role") in self.FIXTURES_ROLES:
+        # Priority 2: role-based match.
+        for k in candidates:
+            if self.endpoints[k].get("role") in self.FIXTURES_ROLES:
                 return k
-
         # Priority 3: keyword match on the endpoint key itself.
-        for k, info in self.endpoints.items():
-            url = self._get_endpoint_url(info)
-            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
-                continue
+        for k in candidates:
             if any(kw in k.lower() for kw in self.FIXTURE_URL_KEYWORDS):
                 return k
         return None
+
+    def _find_odds_endpoint(self) -> Optional[str]:
+        """Return a real odds/market endpoint, prioritizing match/market URL
+        keywords and ignoring configuration/system endpoints."""
+        role_matches = [
+            k for k, info in self.endpoints.items()
+            if info.get("role") in self.ODDS_ROLES
+            and not self._is_excluded_endpoint(k, info)
+        ]
+        # Priority 1: role match whose URL/key references events/markets.
+        for k in role_matches:
+            url = self._get_endpoint_url(self.endpoints[k])
+            if any(kw in url or kw in k.lower() for kw in self.MATCH_URL_KEYWORDS):
+                return k
+        # Priority 2: any non-excluded role match.
+        return role_matches[0] if role_matches else None
 
     def _get_fixtures_params(self, fixtures_key: str) -> Dict[str, Any]:
         """Return parameters to pass to the fixtures endpoint, hydrating count/limit placeholders with 10."""
@@ -157,16 +201,35 @@ class TargetAuditor:
                     return True
         return False
 
+    def _is_match_entity(self, node: Dict[str, Any]) -> bool:
+        """Return True only if the dict looks like an actual fixture/match
+        entity: it has an ID and distinct competitors/participants (or a
+        'Team A vs Team B' style name). Sports, leagues, and system objects
+        lack competitors and are rejected."""
+        keys = {str(k).lower() for k in node}
+        if not any(k in keys for k in (
+            "id", "match_id", "matchid", "event_id", "eventid", "fixture_id", "fixtureid",
+        )):
+            return False
+        if any(k in keys for k in self.COMPETITOR_KEYS):
+            return True
+        for name_key in ("name", "title", "event", "match"):
+            value = node.get(name_key)
+            if isinstance(value, str) and (" vs " in value.lower() or " @ " in value.lower()):
+                return True
+        return False
+
     def _extract_match_id(self, payload: Any) -> Optional[str]:
-        """Recursively search for a numeric ID that looks like a match/event ID."""
+        """Recursively search for an ID from an actual fixture/match entity
+        (having distinct competitors/participants), never from isolated
+        sports, leagues, or system/config objects."""
         if isinstance(payload, dict):
-            # Prefer keys that explicitly indicate a match/event.
-            for key in ("match_id", "event_id", "fixture_id", "id", "eventId", "fixtureId", "matchId"):
-                if key in payload:
-                    val = payload[key]
-                    if isinstance(val, (int, str)) and not isinstance(val, bool):
+            if self._is_match_entity(payload):
+                for key in ("match_id", "event_id", "fixture_id",
+                            "matchid", "eventid", "fixtureid", "id"):
+                    val = payload.get(key)
+                    if isinstance(val, (int, str)) and not isinstance(val, bool) and str(val).strip():
                         return str(val)
-            # Recurse into values.
             for value in payload.values():
                 result = self._extract_match_id(value)
                 if result is not None:
@@ -178,20 +241,54 @@ class TargetAuditor:
                     return result
         return None
 
+    def _collect_odds(self, payload: Any, limit: int = 0) -> List[float]:
+        """Collect numeric values that look like betting odds, but only within
+        genuine betting-market contexts (markets/selections/odds structures).
+        Configuration/system numbers (min/max bets, limits, timeouts) are
+        rejected because they lack a market context and an odds-value key."""
+        samples: List[float] = []
+
+        def walk(node: Any, in_market: bool) -> None:
+            if limit and len(samples) >= limit:
+                return
+            if isinstance(node, dict):
+                context = in_market or any(
+                    str(k).lower() in self.MARKET_CONTEXT_KEYS for k in node
+                )
+                for key, value in node.items():
+                    if (
+                        context
+                        and isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and str(key).lower() in self.ODDS_VALUE_KEYS
+                        and 1.0 < float(value) < 1000.0
+                    ):
+                        samples.append(float(value))
+                        if limit and len(samples) >= limit:
+                            return
+                    else:
+                        walk(value, context)
+            elif isinstance(node, list):
+                for item in node:
+                    if (
+                        in_market
+                        and isinstance(item, (int, float))
+                        and not isinstance(item, bool)
+                        and 1.0 < float(item) < 1000.0
+                    ):
+                        samples.append(float(item))
+                        if limit and len(samples) >= limit:
+                            return
+                    else:
+                        walk(item, in_market)
+
+        walk(payload, False)
+        return samples
+
     def _count_odds(self, payload: Any) -> int:
-        """Count numeric values that look like betting odds (>1.0 and <1000.0)."""
-        count = 0
-        if isinstance(payload, dict):
-            for value in payload.values():
-                count += self._count_odds(value)
-        elif isinstance(payload, list):
-            for item in payload:
-                count += self._count_odds(item)
-        elif isinstance(payload, (int, float)) and not isinstance(payload, bool):
-            # Odds are typically >1.0 and <1000.0; ignore IDs and small integers.
-            if 1.0 < float(payload) < 1000.0:
-                count += 1
-        return count
+        """Count numeric values that look like betting odds within genuine
+        betting-market contexts."""
+        return len(self._collect_odds(payload))
 
     def _print_endpoints(self) -> None:
         """Print all stored endpoints for transparency."""
@@ -207,24 +304,9 @@ class TargetAuditor:
         print()
 
     def _extract_sample_odds(self, payload: Any, limit: int = 5) -> List[float]:
-        """Return up to ``limit`` numeric values that look like betting odds."""
-        samples: List[float] = []
-
-        def walk(node: Any) -> None:
-            if len(samples) >= limit:
-                return
-            if isinstance(node, dict):
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
-            elif isinstance(node, (int, float)) and not isinstance(node, bool):
-                if 1.0 < float(node) < 1000.0:
-                    samples.append(float(node))
-
-        walk(payload)
-        return samples
+        """Return up to ``limit`` numeric values that look like betting odds
+        within genuine betting-market contexts."""
+        return self._collect_odds(payload, limit=limit)
 
     def audit(self) -> Dict[str, Any]:
         """
@@ -298,7 +380,7 @@ class TargetAuditor:
         )
 
         # Step 3: Odds endpoint (tested only if a match ID was harvested)
-        odds_key = self._find_endpoint_by_roles(self.ODDS_ROLES)
+        odds_key = self._find_odds_endpoint()
         if not odds_key:
             details.append(
                 "FAIL: No odds endpoint found (role in {odds_detail, odds, betting_odds, live_odds})."
@@ -306,10 +388,16 @@ class TargetAuditor:
             # Verdict is PASS because active fixtures were successfully fetched.
             return self._build_result("PASS", 0, "", details)
 
-        # Determine the parameter name for the match ID.
+        # Determine the parameter name for the match ID, preferring
+        # event/match/fixture-style names over generic or config parameters.
         odds_info = self.endpoints[odds_key]
         dynamic_params = odds_info.get("dynamic_parameters", [])
-        param_name = dynamic_params[0] if dynamic_params else "event_id"
+        param_name = next(
+            (p for p in dynamic_params if any(
+                kw in str(p).lower() for kw in ("event", "match", "game", "fixture")
+            )),
+            dynamic_params[0] if dynamic_params else "event_id",
+        )
 
         try:
             odds_payload = self.executor.execute(odds_key, params={param_name: match_id})

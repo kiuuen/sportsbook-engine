@@ -430,20 +430,6 @@ class DatabaseManager:
         except sqlite3.Error as err:
             logging.error(f"[DB] Failed to delete target '{normalized}': {err}")
             return False
-        conn = self.get_connection()
-        now = self._utc_now_iso()
-        query = """
-            INSERT INTO replay_health_logs (
-                target_id, endpoint_key, status, status_code, message, response_preview, executed_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """
-        with conn:
-            cur = conn.execute(
-                query,
-                (target_id, endpoint_key, status, status_code, message, response_preview, now),
-            )
-            return cur.lastrowid
 
     def get_recent_replay_logs(
         self, target_id: int, limit: int = 50

@@ -15,6 +15,7 @@ of ``rich`` and ``asyncio``. It provides:
 import asyncio
 import datetime
 import logging
+import pathlib
 import sys
 import threading
 import time
@@ -575,6 +576,22 @@ class TUITerminal:
             Layout(name="target_summary", size=8),
             Layout(name="target_details", ratio=1),
         )
+
+    def _create_file_log_handler(self) -> Optional[logging.Handler]:
+        """Create a file logging handler for persistent log recording."""
+        try:
+            log_dir = pathlib.Path("./logs")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "tui.log"
+            handler = logging.FileHandler(str(log_file), encoding="utf-8")
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+            )
+            return handler
+        except Exception as err:
+            logger.warning(f"Failed to create file log handler: {err}")
+            return None
 
     def _setup_logging_handler(self) -> None:
         """Route log records into the on-screen buffer and the persistent log file.

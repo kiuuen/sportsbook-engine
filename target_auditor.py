@@ -16,6 +16,8 @@ import argparse
 import json
 import logging
 import pathlib
+import urllib.parse
+
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -60,6 +62,13 @@ class TargetAuditor:
         if not self.endpoints:
             raise RuntimeError(f"Target {target_id} has no endpoints in its schema.")
 
+    def _find_endpoint_by_roles(self, roles: Set[str]) -> Optional[str]:
+        """Return the first endpoint key whose role is in the given set."""
+        for key, info in self.endpoints.items():
+            if info.get("role") in roles:
+                return key
+        return None
+
     def _find_fixtures_endpoint(self) -> Optional[str]:
         """Return a fixtures endpoint, preferring role match, then keyword match."""
         # First try by role
@@ -75,6 +84,30 @@ class TargetAuditor:
             if any(kw in url.lower() for kw in keywords):
                 return k
         return None
+
+    def _get_fixtures_params(self, fixtures_key: str) -> Dict[str, Any]:
+        """Return parameters to pass to the fixtures endpoint, hydrating count/limit placeholders with 10."""
+        info = self.endpoints.get(fixtures_key, {})
+        url_template = info.get("url", "")
+        params: Dict[str, Any] = {}
+
+        # Parse the URL template to find query parameters with placeholders.
+        parsed = urllib.parse.urlparse(url_template)
+        query_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        for param_name, values in query_params.items():
+            for val in values:
+                if "{" in val and "}" in val:
+                    placeholder = val[val.find("{") + 1:val.find("}")]
+                    # If the parameter name is a count/limit keyword, hydrate with 10.
+                    if any(kw in param_name.lower() for kw in ("count", "limit", "perpage", "max", "size", "page", "offset")):
+                        params[placeholder] = 10
+
+        # Also check dynamic_parameters for count/limit names.
+        for param in info.get("dynamic_parameters", []):
+            if any(kw in param.lower() for kw in ("count", "limit", "perpage", "max", "size", "page", "offset")):
+                params[param] = 10
+
+        return params
 
     def _is_catalog_payload(self, payload: Any) -> bool:
         """Check if the payload contains sports/categories/leagues."""
@@ -95,7 +128,7 @@ class TargetAuditor:
         """Recursively search for a numeric ID that looks like a match/event ID."""
         if isinstance(payload, dict):
             # Prefer keys that explicitly indicate a match/event.
-            for key in ("match_id", "event_id", "fixture_id", "id"):
+            for key in ("match_id", "event_id", "fixture_id", "id", "eventId", "fixtureId", "matchId"):
                 if key in payload:
                     val = payload[key]
                     if isinstance(val, (int, str)) and not isinstance(val, bool):
@@ -210,8 +243,9 @@ class TargetAuditor:
             )
             return self._build_result("FAIL", 0, "", details)
 
+        fixtures_params = self._get_fixtures_params(fixtures_key)
         try:
-            fixtures_payload = self.executor.execute(fixtures_key)
+            fixtures_payload = self.executor.execute(fixtures_key, params=fixtures_params)
         except Exception as err:
             details.append(
                 f"FAIL: Live fixtures endpoint '{fixtures_key}' failed: {err}"

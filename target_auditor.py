@@ -16,9 +16,8 @@ import argparse
 import json
 import logging
 import pathlib
-import urllib.parse
-
 import sys
+import urllib.parse
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database_manager import DatabaseManager
@@ -28,24 +27,28 @@ from replay_executor import ReplayExecutor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("target_auditor")
 
-
 class TargetAuditor:
     """Audit a stored target for working events and real betting odds."""
 
     # Roles that identify the three pipeline stages.
-    CATALOG_ROLES = {"catalog_root", "sports_catalog", "categories"}
-    FIXTURES_ROLES = {"fixtures_list", "live_fixtures", "live_overview", "upcoming_fixtures"}
-    ODDS_ROLES = {"odds_detail", "odds", "betting_odds", "live_odds"}
+    CATALOG_ROLES: Set[str] = {"catalog_root", "sports_catalog", "categories"}
+    FIXTURES_ROLES: Set[str] = {"fixtures_list", "live_fixtures", "live_overview", "upcoming_fixtures"}
+    ODDS_ROLES: Set[str] = {"odds_detail", "odds", "betting_odds", "live_odds"}
 
     # URL keywords identifying real fixture endpoints.
-    FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
+    FIXTURE_URL_KEYWORDS: Tuple[str, ...] = ("livenow", "liveoverview", "upcoming", "highlights")
     # URL/key keywords that indicate genuine match/market endpoints.
-    MATCH_URL_KEYWORDS = ("event", "match", "fixture", "game", "market", "odds")
+    MATCH_URL_KEYWORDS: Tuple[str, ...] = ("event", "match", "fixture", "game", "market", "odds")
     # Dict keys whose numeric values are genuine odds (leaf context).
-    ODDS_VALUE_KEYS = ("odds", "price", "decimal", "back", "lay", "payout")
-    # Delimiters recognized in international match names ("Team A - Team B",
-    # "Team A v Team B", "Team A / Team B", "Team A vs Team B", "Team A @ Team B").
+    ODDS_VALUE_KEYS: Tuple[str, ...] = ("odds", "price", "decimal", "back", "lay", "payout")
+    # Delimiters recognized in international match names.
     MATCH_NAME_DELIMITERS: Tuple[str, ...] = (" vs ", " v ", " - ", " @ ", " / ")
+    # Parameter-name keywords hydrated with a bounded page size.
+    COUNT_PARAM_KEYWORDS: Tuple[str, ...] = (
+        "count", "limit", "perpage", "max", "size", "page", "offset",
+    )
+    # Default page size used when hydrating count/limit placeholders.
+    DEFAULT_PAGE_SIZE: int = 10
 
     def __init__(
         self,
@@ -59,6 +62,10 @@ class TargetAuditor:
             target_id: Database ID of the target to audit.
             db_manager: Optional DatabaseManager instance. If None, a default
                 manager is created using the standard control-plane DB path.
+
+        Raises:
+            RuntimeError: If the target cannot be loaded, has no endpoints,
+                or the sportsbook lexicon cannot be initialized.
         """
         self.target_id = target_id
         self.db_manager = db_manager or DatabaseManager(db_path="./data/control_plane.db")
@@ -69,7 +76,7 @@ class TargetAuditor:
         except Exception as err:
             raise RuntimeError(f"Failed to load target {target_id}: {err}") from err
 
-        self.endpoints: Dict[str, Dict[str, Any]] = self.executor.endpoints
+        self.endpoints: Dict[str, Dict[str, Any]] = getattr(self.executor, "endpoints", {})
         if not self.endpoints:
             raise RuntimeError(f"Target {target_id} has no endpoints in its schema.")
 
@@ -79,18 +86,11 @@ class TargetAuditor:
         except Exception as err:
             raise RuntimeError(f"Failed to load sportsbook lexicon: {err}") from err
 
-        try:
-            with open("network_filters.json", "r", encoding="utf-8") as handle:
-                loaded_filters = json.load(handle)
-            self.network_filters: Dict[str, Any] = loaded_filters if isinstance(loaded_filters, dict) else {}
-        except FileNotFoundError:
-            logger.warning("Network filters file 'network_filters.json' not found; proceeding without URL filters.")
-            self.network_filters = {}
-        except (json.JSONDecodeError, OSError) as err:
-            logger.warning(f"Failed to load network filters: {err}")
-            self.network_filters = {}
+        # Network filters and canonical pipeline are loaded via dedicated helpers.
+        self.network_filters: Dict[str, Any] = self._load_network_filters()
+        self.canonical_pipeline: Dict[str, Any] = self._load_canonical_pipeline()
 
-        filter_url_keywords = {
+        filter_url_keywords: Set[str] = {
             str(kw).lower() for kw in self.network_filters.get("ignored_url_keywords", [])
         }
         # URL-level noise rejection: filter file keywords + all lexicon noise terms.
@@ -103,7 +103,7 @@ class TargetAuditor:
         )
         # Competitor keys are derived from the event-metadata lexicon category,
         # restricted to terms that semantically denote competing sides.
-        competitor_markers = (
+        competitor_markers: Tuple[str, ...] = (
             "home", "away", "competitor", "participant", "team",
             "player", "opponent", "guest", "visitor", "host",
         )
@@ -112,17 +112,58 @@ class TargetAuditor:
             term for term in event_terms if any(marker in term for marker in competitor_markers)
         }
 
-        # Canonical pipeline priority read from the SQLite control plane.
+    def _load_network_filters(self) -> Dict[str, Any]:
+        """Load URL noise filters from 'network_filters.json' if present."""
+        filter_path = pathlib.Path("network_filters.json")
+        try:
+            with filter_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                return loaded
+            logger.warning("Network filters file has unexpected top-level type; ignoring it.")
+            return {}
+        except FileNotFoundError:
+            logger.warning(
+                "Network filters file 'network_filters.json' not found; proceeding without URL filters."
+            )
+            return {}
+        except (json.JSONDecodeError, OSError) as err:
+            logger.warning(f"Failed to load network filters: {err}")
+            return {}
+
+    def _load_canonical_pipeline(self) -> Dict[str, Any]:
+        """Load the canonical pipeline priority map from the control-plane DB."""
         try:
             target_row = self.db_manager.get_target_by_domain(self.executor.target_domain)
-            self.canonical_pipeline: Dict[str, Any] = (
-                target_row.get("canonical_pipeline", {}) if isinstance(target_row, dict) else {}
-            )
-            if not isinstance(self.canonical_pipeline, dict):
-                self.canonical_pipeline = {}
+            pipeline = target_row.get("canonical_pipeline", {}) if isinstance(target_row, dict) else {}
+            return pipeline if isinstance(pipeline, dict) else {}
         except Exception as err:
             logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
-            self.canonical_pipeline = {}
+            return {}
+
+    def _resolve_pipeline_key(self, pipeline_value: Any) -> Optional[str]:
+        """Resolve a canonical-pipeline value (e.g. 'GET_https://...') to a
+        stored endpoint key.
+
+        The pipeline value may be:
+          - None: no resolution possible.
+          - A direct endpoint key present in ``self.endpoints``.
+          - A 'METHOD_url' composite string whose URL suffix matches a stored
+            endpoint's template_url.
+        """
+        if not isinstance(pipeline_value, str) or not pipeline_value.strip():
+            return None
+        value = pipeline_value.strip()
+        if value in self.endpoints:
+            return value
+        # Strip a leading 'METHOD_' prefix and match on the URL portion.
+        url_part = value.split("_", 1)[1] if "_" in value else value
+        url_part_l = url_part.lower()
+        for key, info in self.endpoints.items():
+            template = str(info.get("template_url") or info.get("url") or "").lower()
+            if template and template == url_part_l:
+                return key
+        return None
 
     def _is_excluded_endpoint(self, key: str, info: Dict[str, Any]) -> bool:
         """Return True for configuration/system endpoints that must be ignored."""
@@ -171,8 +212,11 @@ class TargetAuditor:
 
         for stage in ("live_overview", "upcoming_fixtures"):
             resolved = self._resolve_pipeline_key(self.canonical_pipeline.get(stage))
-            if resolved and resolved not in candidates and not self._is_excluded_endpoint(
-                resolved, self.endpoints[resolved]
+            if (
+                resolved
+                and resolved in self.endpoints
+                and resolved not in candidates
+                and not self._is_excluded_endpoint(resolved, self.endpoints[resolved])
             ):
                 candidates.append(resolved)
 
@@ -195,8 +239,10 @@ class TargetAuditor:
         """Return a real odds/market endpoint, prioritizing match/market URL
         keywords and ignoring configuration/system endpoints."""
         canonical_odds = self._resolve_pipeline_key(self.canonical_pipeline.get("match_detail_metrics"))
-        if canonical_odds and canonical_odds in self.endpoints and not self._is_excluded_endpoint(
-            canonical_odds, self.endpoints[canonical_odds]
+        if (
+            canonical_odds
+            and canonical_odds in self.endpoints
+            and not self._is_excluded_endpoint(canonical_odds, self.endpoints[canonical_odds])
         ):
             return canonical_odds
 
@@ -214,7 +260,8 @@ class TargetAuditor:
         return role_matches[0] if role_matches else None
 
     def _get_fixtures_params(self, fixtures_key: str) -> Dict[str, Any]:
-        """Return parameters to pass to the fixtures endpoint, hydrating count/limit placeholders with 10."""
+        """Return parameters for the fixtures endpoint, hydrating count/limit
+        placeholders with a bounded page size."""
         info = self.endpoints.get(fixtures_key, {})
         url_template = str(info.get("template_url") or info.get("url") or "")
         params: Dict[str, Any] = {}
@@ -226,14 +273,13 @@ class TargetAuditor:
             for val in values:
                 if "{" in val and "}" in val:
                     placeholder = val[val.find("{") + 1:val.find("}")]
-                    # If the parameter name is a count/limit keyword, hydrate with 10.
-                    if any(kw in param_name.lower() for kw in ("count", "limit", "perpage", "max", "size", "page", "offset")):
-                        params[placeholder] = 10
+                    if any(kw in param_name.lower() for kw in self.COUNT_PARAM_KEYWORDS):
+                        params[placeholder] = self.DEFAULT_PAGE_SIZE
 
         # Also check dynamic_parameters for count/limit names.
         for param in info.get("dynamic_parameters", []):
-            if any(kw in param.lower() for kw in ("count", "limit", "perpage", "max", "size", "page", "offset")):
-                params[param] = 10
+            if any(kw in str(param).lower() for kw in self.COUNT_PARAM_KEYWORDS):
+                params[str(param)] = self.DEFAULT_PAGE_SIZE
 
         return params
 
@@ -241,15 +287,12 @@ class TargetAuditor:
         """Check if the payload contains sports/categories/leagues."""
         if not isinstance(payload, dict):
             return False
-        # Look for common keys that indicate a catalog.
         for key in ("sports", "categories", "leagues", "competitions", "events"):
             if key in payload:
                 return True
-        # Recursively check nested dicts/lists.
         for value in payload.values():
-            if isinstance(value, (dict, list)):
-                if self._is_catalog_payload(value):
-                    return True
+            if isinstance(value, (dict, list)) and self._is_catalog_payload(value):
+                return True
         return False
 
     def _has_match_delimiter(self, name: str) -> bool:
@@ -359,9 +402,14 @@ class TargetAuditor:
         betting-market contexts."""
         return len(self._collect_odds(payload))
 
+    def _extract_sample_odds(self, payload: Any, limit: int = 5) -> List[float]:
+        """Return up to ``limit`` numeric values that look like betting odds
+        within genuine betting-market contexts."""
+        return self._collect_odds(payload, limit=limit)
+
     def _print_endpoints(self) -> None:
         """Print all stored endpoints for transparency."""
-        print("\nStored endpoints for target {}:".format(self.target_id))
+        print(f"\nStored endpoints for target {self.target_id}:")
         for key, info in self.endpoints.items():
             print(
                 "  - key: {:<30} category: {:<15} role: {}".format(
@@ -372,10 +420,28 @@ class TargetAuditor:
             )
         print()
 
-    def _extract_sample_odds(self, payload: Any, limit: int = 5) -> List[float]:
-        """Return up to ``limit`` numeric values that look like betting odds
-        within genuine betting-market contexts."""
-        return self._collect_odds(payload, limit=limit)
+    def _build_odds_curl(self, odds_key: str, param_name: str, match_id: str) -> str:
+        """Build a ready-to-run curl command for the odds endpoint.
+
+        Prefers ReplayExecutor.to_curl when available; falls back to the
+        stored curl_command with the template URL hydrated via hydrate_url.
+        """
+        to_curl = getattr(self.executor, "to_curl", None)
+        if callable(to_curl):
+            try:
+                return str(to_curl(odds_key, params={param_name: match_id}))
+            except Exception as err:
+                logger.warning(f"ReplayExecutor.to_curl failed: {self._format_error(err)}")
+        # Fallback: hydrate the stored template URL manually.
+        try:
+            hydrated = self.executor.hydrate_url(
+                self.endpoints[odds_key].get("template_url", ""), {param_name: match_id}
+            )
+            method = str(self.endpoints[odds_key].get("method", "GET")).upper()
+            return f'curl -X {method} "{hydrated}"'
+        except Exception as err:
+            logger.warning(f"Failed to build fallback curl command: {self._format_error(err)}")
+            return ""
 
     def audit(self) -> Dict[str, Any]:
         """
@@ -435,7 +501,8 @@ class TargetAuditor:
                 candidate_payload = self.executor.execute(candidate_key, params=fixtures_params)
             except Exception as err:
                 details.append(
-                    f"INFO: Fixtures candidate '{candidate_key}' failed: {self._format_error(err)}; probing next candidate."
+                    f"INFO: Fixtures candidate '{candidate_key}' failed: "
+                    f"{self._format_error(err)}; probing next candidate."
                 )
                 continue
             candidate_match_id = self._extract_match_id(candidate_payload)
@@ -444,12 +511,14 @@ class TargetAuditor:
                 fixtures_key = candidate_key
                 break
             details.append(
-                f"INFO: Fixtures candidate '{candidate_key}' returned no active match ID; probing next candidate."
+                f"INFO: Fixtures candidate '{candidate_key}' returned no active match ID; "
+                "probing next candidate."
             )
 
         if not match_id or fixtures_key is None:
             details.append(
-                f"FAIL: All {len(fixtures_candidates)} fixtures candidates exhausted without harvesting an active match ID."
+                f"FAIL: All {len(fixtures_candidates)} fixtures candidates exhausted "
+                "without harvesting an active match ID."
             )
             return self._build_result("FAIL", 0, "", details)
 
@@ -475,28 +544,26 @@ class TargetAuditor:
             (p for p in dynamic_params if any(
                 kw in str(p).lower() for kw in ("event", "match", "game", "fixture")
             )),
-            dynamic_params[0] if dynamic_params else "event_id",
+            str(dynamic_params[0]) if dynamic_params else "event_id",
         )
 
         try:
             odds_payload = self.executor.execute(odds_key, params={param_name: match_id})
         except Exception as err:
             details.append(
-                f"FAIL: Odds endpoint '{odds_key}' failed with match ID {match_id}: {self._format_error(err)}"
+                f"FAIL: Odds endpoint '{odds_key}' failed with match ID {match_id}: "
+                f"{self._format_error(err)}"
             )
             # Verdict is PASS because active fixtures were successfully fetched.
             return self._build_result("PASS", 0, "", details)
 
         total_odds = self._count_odds(odds_payload)
         if total_odds == 0:
-            details.append(
-                f"FAIL: Odds endpoint '{odds_key}' returned no numeric odds."
-            )
+            details.append(f"FAIL: Odds endpoint '{odds_key}' returned no numeric odds.")
         else:
             details.append(
                 f"PASS: Odds endpoint '{odds_key}' returned {total_odds} numeric odds."
             )
-            # Extract and display sample odds.
             sample_odds = self._extract_sample_odds(odds_payload)
             if sample_odds:
                 details.append(
@@ -504,11 +571,7 @@ class TargetAuditor:
                 )
 
         # Build curl command for the odds endpoint.
-        try:
-            curl_command = self.executor.to_curl(odds_key, params={param_name: match_id})
-        except Exception as err:
-            logger.warning(f"Failed to generate curl command: {err}")
-            curl_command = ""
+        curl_command = self._build_odds_curl(odds_key, param_name, match_id)
 
         # Final verdict: PASS if we have odds OR active fixtures.
         verdict = "PASS" if (total_odds > 0 or fixtures_success) else "FAIL"
@@ -529,13 +592,11 @@ class TargetAuditor:
             "details": details,
         }
 
-
 def list_targets(db_manager: DatabaseManager) -> List[Dict[str, Any]]:
     """Return a list of all targets from the database."""
     conn = db_manager.get_connection()
     rows = conn.execute("SELECT id, domain, provider_family FROM targets ORDER BY id").fetchall()
     return [dict(row) for row in rows]
-
 
 def run_cli() -> None:
     """Interactive CLI to select and audit a target."""

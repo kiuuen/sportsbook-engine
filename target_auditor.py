@@ -78,6 +78,16 @@ class TargetAuditor:
         """Return the endpoint URL, preferring template_url (the ReplayExecutor key)."""
         return str(info.get("template_url") or info.get("url") or "").lower()
 
+    @staticmethod
+    def _format_error(err: BaseException) -> str:
+        """Flatten an exception and its cause chain into one readable message."""
+        parts: List[str] = [str(err)]
+        cause: Optional[BaseException] = err.__cause__
+        while cause is not None:
+            parts.append(str(cause))
+            cause = cause.__cause__
+        return " -> ".join(part for part in parts if part)
+
     def _find_fixtures_endpoint(self) -> Optional[str]:
         """Return a real fixtures endpoint, prioritizing URL keyword matches
         and explicitly ignoring configuration/system endpoints."""

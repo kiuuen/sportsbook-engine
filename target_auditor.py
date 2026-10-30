@@ -60,11 +60,20 @@ class TargetAuditor:
         if not self.endpoints:
             raise RuntimeError(f"Target {target_id} has no endpoints in its schema.")
 
-    def _find_endpoint_by_roles(self, roles: Set[str]) -> Optional[str]:
-        """Return the first endpoint key whose role is in ``roles``."""
-        for key, info in self.endpoints.items():
-            if info.get("role", "").lower() in roles:
-                return key
+    def _find_fixtures_endpoint(self) -> Optional[str]:
+        """Return a fixtures endpoint, preferring role match, then keyword match."""
+        # First try by role
+        key = self._find_endpoint_by_roles(self.FIXTURES_ROLES)
+        if key:
+            return key
+        # Fallback: by keywords in key or URL
+        keywords = ("livenow", "upcoming", "highlights", "fixtures")
+        for k, info in self.endpoints.items():
+            if any(kw in k.lower() for kw in keywords):
+                return k
+            url = info.get("url", "")
+            if any(kw in url.lower() for kw in keywords):
+                return k
         return None
 
     def _is_catalog_payload(self, payload: Any) -> bool:
@@ -194,7 +203,7 @@ class TargetAuditor:
                     )
 
         # Step 2: Live fixtures endpoint (required for match ID)
-        fixtures_key = self._find_endpoint_by_roles(self.FIXTURES_ROLES)
+        fixtures_key = self._find_fixtures_endpoint()
         if not fixtures_key:
             details.append(
                 "FAIL: No live fixtures endpoint found (role in {fixtures_list, live_fixtures, live_overview, upcoming_fixtures})."

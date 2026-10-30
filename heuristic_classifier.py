@@ -138,10 +138,15 @@ class RouteTemplateDeducer:
             k_lower = k.lower()
             val = vals[0] if vals else ""
 
-            if "market" in k_lower or "mkt" in k_lower:
-                placeholder = f"{k}={{market_id}}"
-            elif "event" in k_lower or "match" in k_lower or "fixture" in k_lower:
+            # Count/limit parameters – keep their numeric value
+            count_limit_keywords = ("count", "limit", "perpage", "max", "size", "page", "offset")
+            if any(kw in k_lower for kw in count_limit_keywords):
+                placeholder = f"{k}={val}"
+            # Actual ID parameters – replace with {event_id}
+            elif any(id_kw in k_lower for id_kw in ("eventid", "event_id", "matchid", "fixtureid", "id")):
                 placeholder = f"{k}={{event_id}}"
+            elif "market" in k_lower or "mkt" in k_lower:
+                placeholder = f"{k}={{market_id}}"
             elif "time" in k_lower or "date" in k_lower or re.match(r"^\d{10}(\d{3})?$", val):
                 placeholder = f"{k}={{timestamp}}"
             elif re.match(r"^\d{5,}$", val):
@@ -332,13 +337,18 @@ class HeuristicClassifier:
     ) -> Tuple[str, str]:
         has_path_params = bool(re.search(r"\{[^}]+\}", url_template))
 
-        # Role classification logic
-        if total_odds_count >= 10 or (has_path_params and total_odds_count >= 3):
-            role = "odds_detail"
-        elif significant_arrays_count >= 1 and (total_odds_count >= 1 or pos_score >= 20.0):
+        # New: force fixtures_list for list-oriented paths
+        list_keywords = ("livenow", "upcoming", "highlights", "fixtures", "liveevents", "matches")
+        if any(kw in url_template.lower() for kw in list_keywords):
             role = "fixtures_list"
         else:
-            role = "catalog_root"
+            # Existing role logic
+            if total_odds_count >= 10 or (has_path_params and total_odds_count >= 3):
+                role = "odds_detail"
+            elif significant_arrays_count >= 1 and (total_odds_count >= 1 or pos_score >= 20.0):
+                role = "fixtures_list"
+            else:
+                role = "catalog_root"
 
         # Volatility tier classification logic
         if is_websocket or (call_count >= 2 and time_span_seconds > 0.0 and (time_span_seconds / call_count) <= 5.0) or role == "odds_detail":

@@ -576,7 +576,9 @@ if __name__ == "__main__":
         """Load network_filters.json, degrading gracefully to an empty config."""
         path = pathlib.Path(filters_path)
         if not path.exists():
-            logger.warning(f"Network filters file not found at {path.resolve()}; proceeding without URL filters.")
+            logger.warning(
+                f"Network filters file not found at {path.resolve()}; proceeding without URL filters."
+            )
             return {}
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -586,17 +588,6 @@ if __name__ == "__main__":
             logger.warning(f"Failed to load network filters from {path}: {err}")
             return {}
 
-    def _load_canonical_pipeline(self) -> Dict[str, Any]:
-        """Read the target's stored canonical pipeline from SQLite."""
-        try:
-            target = self.db_manager.get_target_by_domain(self.executor.target_domain)
-            if target:
-                pipeline = target.get("canonical_pipeline")
-                if isinstance(pipeline, dict):
-                    return pipeline
-        except Exception as err:
-            logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
-        return {}
     def _load_canonical_pipeline(self) -> Dict[str, Any]:
         """Read the target's stored canonical pipeline from SQLite."""
         try:

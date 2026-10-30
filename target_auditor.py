@@ -22,6 +22,7 @@ import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database_manager import DatabaseManager
+from heuristic_classifier import LexiconManager
 from replay_executor import ReplayExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -38,30 +39,15 @@ class TargetAuditor:
 
     # URL keywords identifying real fixture endpoints.
     FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
-    # URL keywords identifying configuration/system endpoints to ignore.
-    EXCLUDED_URL_KEYWORDS = ("params", "settings", "translations", "auth")
-    # Endpoint-key/role keywords identifying configuration/system endpoints.
-    EXCLUDED_KEY_KEYWORDS = (
-        "param", "setting", "config", "system", "default", "translation",
-        "auth", "login", "session", "metadata", "permission", "preference",
-        "feature", "banner", "menu", "navigation",
-    )
+    # URL keywords identifying real fixture endpoints.
+    FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
     # URL/key keywords that indicate genuine match/market endpoints.
     MATCH_URL_KEYWORDS = ("event", "match", "fixture", "game", "market", "odds")
     # Dict keys whose numeric values are genuine odds (leaf context).
     ODDS_VALUE_KEYS = ("odds", "price", "decimal", "back", "lay", "payout")
-    # Dict keys that establish a betting-market context.
-    MARKET_CONTEXT_KEYS = (
-        "market", "markets", "selection", "selections", "outcome", "outcomes",
-        "runner", "runners", "bet", "bets", "line", "lines", "bookmaker",
-        "bookmakers", "odds", "price", "pick", "picks",
-    )
-    # Dict keys that establish a match/fixture entity (distinct competitors).
-    COMPETITOR_KEYS = (
-        "home", "away", "guest", "visitor", "host", "competitors",
-        "participants", "teams", "team1", "team2", "home_team", "away_team",
-        "hometeam", "awayteam", "player1", "player2", "opponent",
-    )
+    # Delimiters recognized in international match names ("Team A - Team B",
+    # "Team A v Team B", "Team A / Team B", "Team A vs Team B", "Team A @ Team B").
+    MATCH_NAME_DELIMITERS: Tuple[str, ...] = (" vs ", " v ", " - ", " @ ", " / ")
 
     def __init__(
         self,
@@ -94,11 +80,11 @@ class TargetAuditor:
         url = self._get_endpoint_url(info)
         key_l = key.lower()
         role = str(info.get("role", "")).lower()
-        if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
+        if any(ex in url for ex in self.excluded_url_keywords):
             return True
-        if any(ex in key_l for ex in self.EXCLUDED_KEY_KEYWORDS):
+        if any(ex in key_l for ex in self.excluded_key_keywords):
             return True
-        if any(ex in role for ex in self.EXCLUDED_KEY_KEYWORDS):
+        if any(ex in role for ex in self.excluded_key_keywords):
             return True
         return False
 
@@ -125,30 +111,46 @@ class TargetAuditor:
             cause = cause.__cause__
         return " -> ".join(part for part in parts if part)
 
-    def _find_fixtures_endpoint(self) -> Optional[str]:
-        """Return a real fixtures endpoint, prioritizing URL keyword matches
-        and explicitly ignoring configuration/system endpoints."""
-        candidates = [
-            k for k in self.endpoints
-            if not self._is_excluded_endpoint(k, self.endpoints[k])
+    def _get_fixtures_candidates(self) -> List[str]:
+        """Return an ordered list of fixtures endpoint candidates.
+
+        Priority 1: canonical pipeline stages (live_overview, upcoming_fixtures)
+        resolved against stored endpoints. Priority 2-4: heuristic URL-keyword,
+        role, and endpoint-key matches. Duplicates are removed preserving order.
+        """
+        candidates: List[str] = []
+
+        for stage in ("live_overview", "upcoming_fixtures"):
+            resolved = self._resolve_pipeline_key(self.canonical_pipeline.get(stage))
+            if resolved and resolved not in candidates and not self._is_excluded_endpoint(
+                resolved, self.endpoints[resolved]
+            ):
+                candidates.append(resolved)
+
+        non_excluded = [
+            k for k in self.endpoints if not self._is_excluded_endpoint(k, self.endpoints[k])
         ]
-        # Priority 1: real fixture endpoints identified by URL keywords.
-        for k in candidates:
+        for k in non_excluded:
             if any(kw in self._get_endpoint_url(self.endpoints[k]) for kw in self.FIXTURE_URL_KEYWORDS):
-                return k
-        # Priority 2: role-based match.
-        for k in candidates:
+                candidates.append(k)
+        for k in non_excluded:
             if self.endpoints[k].get("role") in self.FIXTURES_ROLES:
-                return k
-        # Priority 3: keyword match on the endpoint key itself.
-        for k in candidates:
+                candidates.append(k)
+        for k in non_excluded:
             if any(kw in k.lower() for kw in self.FIXTURE_URL_KEYWORDS):
-                return k
-        return None
+                candidates.append(k)
+
+        return list(dict.fromkeys(candidates))
 
     def _find_odds_endpoint(self) -> Optional[str]:
         """Return a real odds/market endpoint, prioritizing match/market URL
         keywords and ignoring configuration/system endpoints."""
+        canonical_odds = self._resolve_pipeline_key(self.canonical_pipeline.get("match_detail_metrics"))
+        if canonical_odds and canonical_odds in self.endpoints and not self._is_excluded_endpoint(
+            canonical_odds, self.endpoints[canonical_odds]
+        ):
+            return canonical_odds
+
         role_matches = [
             k for k, info in self.endpoints.items()
             if info.get("role") in self.ODDS_ROLES
@@ -201,21 +203,39 @@ class TargetAuditor:
                     return True
         return False
 
+    def _has_match_delimiter(self, name: str) -> bool:
+        """Return True when the name splits into two non-empty halves on any
+        recognized international match delimiter."""
+        lowered = name.lower()
+        for delimiter in self.MATCH_NAME_DELIMITERS:
+            parts = lowered.split(delimiter)
+            if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
+                return True
+        return False
+
     def _is_match_entity(self, node: Dict[str, Any]) -> bool:
         """Return True only if the dict looks like an actual fixture/match
-        entity: it has an ID and distinct competitors/participants (or a
-        'Team A vs Team B' style name). Sports, leagues, and system objects
-        lack competitors and are rejected."""
+        entity: it has an ID and either structured competitor fields or a
+        delimited match name. Sports, leagues, and system objects are rejected."""
         keys = {str(k).lower() for k in node}
         if not any(k in keys for k in (
             "id", "match_id", "matchid", "event_id", "eventid", "fixture_id", "fixtureid",
         )):
             return False
-        if any(k in keys for k in self.COMPETITOR_KEYS):
-            return True
+        # Structured competitor fields (flat keys or nested competitor objects).
+        for key in self.competitor_keys:
+            if key in keys:
+                value = node.get(key)
+                if isinstance(value, (dict, list)) and value:
+                    return True
+                if isinstance(value, (str, int)) and str(value).strip():
+                    return True
+        # Delimited international match names ("A - B", "A v B", "A / B", ...).
         for name_key in ("name", "title", "event", "match"):
             value = node.get(name_key)
-            if isinstance(value, str) and (" vs " in value.lower() or " @ " in value.lower()):
+            if isinstance(value, str) and (
+                self._has_match_delimiter(value) or " vs " in value.lower() or " @ " in value.lower()
+            ):
                 return True
         return False
 
@@ -253,7 +273,7 @@ class TargetAuditor:
                 return
             if isinstance(node, dict):
                 context = in_market or any(
-                    str(k).lower() in self.MARKET_CONTEXT_KEYS for k in node
+                    str(k).lower() in self.market_context_keys for k in node
                 )
                 for key, value in node.items():
                     if (
@@ -350,33 +370,43 @@ class TargetAuditor:
                         f"SKIP: Catalog endpoint '{catalog_key}' did not return sports/categories."
                     )
 
-        # Step 2: Live fixtures endpoint (required for match ID)
-        fixtures_key = self._find_fixtures_endpoint()
-        if not fixtures_key:
+        # Step 2: Sequential candidate probing for an active match ID.
+        fixtures_candidates = self._get_fixtures_candidates()
+        if not fixtures_candidates:
             details.append(
-                "FAIL: No live fixtures endpoint found (role in {fixtures_list, live_fixtures, live_overview, upcoming_fixtures})."
+                "FAIL: No fixtures candidates found (canonical pipeline empty and no heuristic matches)."
             )
             return self._build_result("FAIL", 0, "", details)
 
-        fixtures_params = self._get_fixtures_params(fixtures_key)
-        try:
-            fixtures_payload = self.executor.execute(fixtures_key, params=fixtures_params)
-        except Exception as err:
+        match_id: Optional[str] = None
+        fixtures_key: Optional[str] = None
+        for candidate_key in fixtures_candidates:
+            fixtures_params = self._get_fixtures_params(candidate_key)
+            try:
+                candidate_payload = self.executor.execute(candidate_key, params=fixtures_params)
+            except Exception as err:
+                details.append(
+                    f"INFO: Fixtures candidate '{candidate_key}' failed: {self._format_error(err)}; probing next candidate."
+                )
+                continue
+            candidate_match_id = self._extract_match_id(candidate_payload)
+            if candidate_match_id:
+                match_id = candidate_match_id
+                fixtures_key = candidate_key
+                break
             details.append(
-                f"FAIL: Live fixtures endpoint '{fixtures_key}' failed: {self._format_error(err)}"
+                f"INFO: Fixtures candidate '{candidate_key}' returned no active match ID; probing next candidate."
             )
-            return self._build_result("FAIL", 0, "", details)
 
-        match_id = self._extract_match_id(fixtures_payload)
-        if not match_id:
+        if not match_id or fixtures_key is None:
             details.append(
-                f"FAIL: Live fixtures endpoint '{fixtures_key}' did not yield a match ID."
+                f"FAIL: All {len(fixtures_candidates)} fixtures candidates exhausted without harvesting an active match ID."
             )
             return self._build_result("FAIL", 0, "", details)
 
         fixtures_success = True
         details.append(
-            f"PASS: Live fixtures endpoint '{fixtures_key}' yielded match ID {match_id}."
+            f"PASS: Fixtures endpoint '{fixtures_key}' yielded match ID {match_id}."
         )
 
         # Step 3: Odds endpoint (tested only if a match ID was harvested)
@@ -511,3 +541,44 @@ def run_cli() -> None:
 
 if __name__ == "__main__":
     run_cli()
+    def _load_network_filters(self, filters_path: str) -> Dict[str, Any]:
+        """Load network_filters.json, degrading gracefully to an empty config."""
+        path = pathlib.Path(filters_path)
+        if not path.exists():
+            logger.warning(f"Network filters file not found at {path.resolve()}; proceeding without URL filters.")
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError) as err:
+            logger.warning(f"Failed to load network filters from {path}: {err}")
+            return {}
+
+    def _load_canonical_pipeline(self) -> Dict[str, Any]:
+        """Read the target's stored canonical pipeline from SQLite."""
+        try:
+            target = self.db_manager.get_target_by_domain(self.executor.target_domain)
+            if target:
+                pipeline = target.get("canonical_pipeline")
+                if isinstance(pipeline, dict):
+                    return pipeline
+        except Exception as err:
+            logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
+        return {}
+
+    def _resolve_pipeline_key(self, pipeline_value: Any) -> Optional[str]:
+        """Map a canonical-pipeline value to a stored endpoint key.
+
+        The value may be the endpoint key itself (e.g. 'GET_https://...') or a
+        template URL matching an endpoint's template_url.
+        """
+        if not isinstance(pipeline_value, str) or not pipeline_value.strip():
+            return None
+        if pipeline_value in self.endpoints:
+            return pipeline_value
+        for key, info in self.endpoints.items():
+            template = str(info.get("template_url") or "")
+            if template and template == pipeline_value:
+                return key
+        return None

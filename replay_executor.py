@@ -256,6 +256,13 @@ class ReplayExecutor:
         except Exception as e:
             logging.warning(f"[ReplayExecutor] Failed to log health record: {e}")
 
+    # Standard Chrome desktop user agent used when the captured session
+    # headers do not include one, preventing bot-filter 403 responses.
+    _DEFAULT_USER_AGENT: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
     @staticmethod
     def _resolve_schema_path(source: Union[str, pathlib.Path]) -> pathlib.Path:
         path = pathlib.Path(source)
@@ -281,11 +288,37 @@ class ReplayExecutor:
             raise RuntimeError(f"Failed to parse schema JSON file at {self.schema_path}: {err}") from err
 
     def _build_request_headers(self) -> Dict[str, str]:
+        """Build outbound request headers from the stored session.
+
+        HTTP/2 pseudo-headers (``:authority``, ``:path``, ``:method``,
+        ``:scheme``) are stripped, a default Chrome desktop ``User-Agent`` is
+        applied when the session does not provide one, and ``Referer`` /
+        ``Origin`` headers are derived from the target domain so third-party
+        provider gateways (e.g. ``biahosted.com``) accept replayed requests.
+        """
         headers: Dict[str, str] = {}
         for key, value in self.session_headers.items():
-            if not isinstance(key, str) or key.startswith(":") or value is None:
+            if not isinstance(key, str) or value is None:
                 continue
-            headers[key.lower()] = str(value)
+            clean_key = key.strip().lower()
+            if not clean_key or clean_key.startswith(":"):
+                # Skip HTTP/2 pseudo-headers such as :authority, :path, :method, :scheme.
+                continue
+            headers[clean_key] = str(value)
+
+        # Guarantee a browser-like User-Agent to avoid gateway 403 rejections.
+        if "user-agent" not in headers:
+            headers["user-agent"] = self._DEFAULT_USER_AGENT
+
+        # Inject Referer/Origin from the target domain so provider gateways
+        # treat the replay as a first-party browser request. Session-provided
+        # values take precedence via setdefault.
+        domain = str(self.target_domain or "").strip().lower()
+        if domain and domain != "unknown_target":
+            origin = f"https://{domain}"
+            headers.setdefault("referer", f"{origin}/")
+            headers.setdefault("origin", origin)
+
         if self.session_cookies:
             cookie_pairs = [
                 f"{key}={value}"

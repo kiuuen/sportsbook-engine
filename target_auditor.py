@@ -590,6 +590,13 @@ if __name__ == "__main__":
         """Read the target's stored canonical pipeline from SQLite."""
         try:
             target = self.db_manager.get_target_by_domain(self.executor.target_domain)
+            if target:
+                pipeline = target.get("canonical_pipeline")
+                if isinstance(pipeline, dict):
+                    return pipeline
+        except Exception as err:
+            logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
+        return {}
     def _load_canonical_pipeline(self) -> Dict[str, Any]:
         """Read the target's stored canonical pipeline from SQLite."""
         try:

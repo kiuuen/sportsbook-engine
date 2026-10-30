@@ -60,3 +60,4 @@ main_url.md
 *.bat
 
 CONVENTIONS.md
+bifrost_logs.py

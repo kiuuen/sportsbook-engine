@@ -375,6 +375,20 @@ class DatabaseManager:
         message: str,
         response_preview: str = "",
     ) -> int:
+        conn = self.get_connection()
+        now = self._utc_now_iso()
+        query = """
+            INSERT INTO replay_health_logs (
+                target_id, endpoint_key, status, status_code, message, response_preview, executed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        with conn:
+            cur = conn.execute(
+                query,
+                (target_id, endpoint_key, status, status_code, message, response_preview, now),
+            )
+            return cur.lastrowid
 
     def delete_target(self, domain: str) -> bool:
         """Delete a target and every record associated with it.

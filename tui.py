@@ -459,6 +459,23 @@ class TUITargetManager:
         target_state["pipeline_active"] = True
         return True, f"Pipeline started for {domain}."
 
+    async def delete_target(self, domain: str) -> Tuple[bool, str]:
+        """Delete a target and its associated data from the control plane."""
+        if domain not in self.active_targets:
+            return False, f"Target domain '{domain}' not found."
+
+        if self.active_targets[domain].get("pipeline_active"):
+            await self.toggle_pipeline(domain)
+
+        try:
+            success = await asyncio.to_thread(self.db_manager.delete_target, domain)
+            if success:
+                self.active_targets.pop(domain, None)
+                return True, f"Target '{domain}' deleted successfully."
+            return False, f"Failed to delete target '{domain}' from database."
+        except Exception as err:
+            return False, f"Error deleting target '{domain}': {err}"
+
     def _handle_pipeline_done(self, domain: str, task: asyncio.Task) -> None:
         """Clean up pipeline state after its background task finishes."""
         try:
@@ -1014,6 +1031,31 @@ class TUITerminal:
                         f"Pipeline toggle on {domain}",
                         self.target_manager.toggle_pipeline(domain),
                     )
+                    continue
+
+                if command == "x":
+                    domain = await self._prompt(
+                        live,
+                        "Enter target domain to delete",
+                        default=self.selected_domain or "",
+                    )
+                    if not domain:
+                        continue
+                    if domain not in self.target_manager.active_targets:
+                        logger.warning(f"Unknown target domain: {domain}")
+                        continue
+                    confirm = await self._prompt(
+                        live,
+                        f"Are you sure you want to delete target '{domain}'? (y/N)",
+                        default="n",
+                    )
+                    if confirm.lower() == "y":
+                        self._launch_action(
+                            f"Delete target {domain}",
+                            self.target_manager.delete_target(domain),
+                        )
+                        if self.selected_domain == domain:
+                            self.selected_domain = None
                     continue
 
                 # Any other key press is ignored.

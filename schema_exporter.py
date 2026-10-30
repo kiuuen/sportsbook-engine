@@ -29,9 +29,21 @@ class SchemaExporter:
         "origin",
     }
 
-    def __init__(self, base_output_dir: str = "./data/schemas") -> None:
+    def __init__(
+        self,
+        base_output_dir: str = "./data/schemas",
+        classifier: Optional[HeuristicClassifier] = None,
+    ) -> None:
         self.output_dir: pathlib.Path = pathlib.Path(base_output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if classifier is not None:
+            self.classifier: Optional[HeuristicClassifier] = classifier
+        else:
+            try:
+                self.classifier = HeuristicClassifier("sportsbook_lexicon.json")
+            except Exception as err:
+                logging.error(f"[SchemaExporter] Failed to initialize HeuristicClassifier: {err}")
+                self.classifier = None
 
     @staticmethod
     def _extract_domain(target_url: str, events: List[NetworkEvent]) -> str:
@@ -119,37 +131,90 @@ class SchemaExporter:
             return data
 
     @staticmethod
-    def _verify_replay_candidate(event: NetworkEvent) -> bool:
-        if not event or not event.url:
-            return False
+    def _evaluate_live_classification(result: ClassificationResult) -> Tuple[bool, str]:
+        """Decide whether a live-probed payload contains real betting signals.
 
-        if event.resource_type == "WebSocket" or event.method in ("WS_RECV", "WS_SENT"):
-            return bool(event.response_body and event.response_body.strip())
+        An endpoint is accepted only when the live response contains structural
+        betting odds or active fixture entities, as judged by the heuristic
+        classifier — never on HTTP status alone.
+        """
+        if result.odds_count > 0:
+            return True, f"Live verification passed: {result.odds_count} structural odds detected."
+        if result.is_viable and result.role == "fixtures_list":
+            return True, "Live verification passed: active fixture entities detected."
+        return False, (
+            f"Live probe rejected: no structural odds (odds_count={result.odds_count}) "
+            f"or active fixture entities (score={result.score}, role={result.role})."
+        )
 
-        clean_headers: Dict[str, str] = {
-            k: v for k, v in event.request_headers.items()
-            if not k.startswith(":") and k.lower() not in ("host", "content-length")
-        }
+    def _live_verify_endpoint(
+        self,
+        event: NetworkEvent,
+        session_headers: Dict[str, str],
+        session_cookies: Dict[str, str],
+    ) -> Tuple[bool, str]:
+        """Strictly verify a candidate endpoint against the live service.
 
-        if "User-Agent" not in clean_headers and "user-agent" not in clean_headers:
-            clean_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        HTTP endpoints are replayed using the captured session headers and
+        cookies; the live response body is then scored by ``HeuristicClassifier``
+        and must contain structural odds or viable fixture entities. WebSocket
+        endpoints cannot be replayed over HTTP, so their captured frame payload
+        is classified instead.
 
-        clean_headers["Accept"] = "application/json, text/plain, */*"
+        Returns:
+            Tuple of (verified, reason_message).
+        """
+        if self.classifier is None:
+            return False, "HeuristicClassifier unavailable; live verification cannot be performed."
+
+        is_websocket = (
+            event.resource_type == "WebSocket" or event.method in ("WS_RECV", "WS_SENT")
+        )
+
+        if is_websocket:
+            captured_body = event.response_body or ""
+            if not captured_body.strip():
+                return False, "WebSocket endpoint rejected: no captured frame payload to validate."
+            result = self.classifier.score_payload(url=event.url, payload_str=captured_body)
+            return self._evaluate_live_classification(result)
+
+        # Merge captured session headers with this event's own request headers.
+        merged_headers: Dict[str, str] = dict(session_headers)
+        for k, v in event.request_headers.items():
+            if k.startswith(":") or k.lower() in ("host", "content-length"):
+                continue
+            merged_headers[k] = v
+
+        # Merge session cookies with any cookies captured on this request.
+        merged_cookies: Dict[str, str] = dict(session_cookies)
+        merged_cookies.update(self._extract_cookies_from_headers(event.request_headers))
+        if merged_cookies:
+            merged_headers["Cookie"] = "; ".join(f"{ck}={cv}" for ck, cv in merged_cookies.items())
+
+        if "User-Agent" not in merged_headers and "user-agent" not in merged_headers:
+            merged_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        merged_headers["Accept"] = "application/json, text/plain, */*"
 
         try:
             req = urllib.request.Request(
                 url=event.url,
-                headers=clean_headers,
+                headers=merged_headers,
                 method=event.method if event.method else "GET",
             )
             with urllib.request.urlopen(req, timeout=8.0) as resp:
-                if resp.status == 200:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    json.loads(body)
-                    return True
-        except Exception:
-            pass
-        return False
+                if resp.status != 200:
+                    return False, f"Live probe rejected: HTTP status {resp.status}."
+                body = resp.read().decode("utf-8", errors="replace")
+        except Exception as err:
+            return False, f"Live probe error: {err}"
+
+        try:
+            json.loads(body)
+        except json.JSONDecodeError:
+            return False, "Live probe rejected: live response body is not valid JSON."
+
+        result = self.classifier.score_payload(url=event.url, payload_str=body)
+        return self._evaluate_live_classification(result)
 
     @staticmethod
     def _infer_provider_family(target_domain: str, endpoints: Dict[str, Any]) -> str:
@@ -280,8 +345,16 @@ class SchemaExporter:
                 is_detailed_or_realtime = (role == "odds_detail" or volatility == "realtime")
                 if is_detailed_or_realtime and getattr(res, "odds_count", 0) < 5 and not is_websocket:
                     continue
-                if not self._verify_replay_candidate(sample_ev):
-                    continue
+            # Strict live verification: only endpoints that replay successfully
+            # AND exhibit structural betting signals are committed to the schema.
+            live_ok, live_msg = self._live_verify_endpoint(
+                sample_ev, session_headers, session_cookies
+            )
+            if not live_ok:
+                logging.info(
+                    f"[SchemaExporter] Discarding endpoint '{getattr(res, 'url', '')}': {live_msg}"
+                )
+                continue
 
             method = sample_ev.method if sample_ev.method else "GET"
             req_headers = sample_ev.request_headers if sample_ev.request_headers else {}
@@ -523,7 +596,7 @@ if __name__ == "__main__":
 
                 # Export validated blueprint schema to JSON file
                 try:
-                    exporter = SchemaExporter()
+                    exporter = SchemaExporter(classifier=classifier)
                     export_path, target_id = exporter.export_schema(
                         target_url=target_url,
                         classified_results=results,

@@ -587,49 +587,5 @@ def run_cli() -> None:
         print(f"  {line}")
     print("=" * 60)
 
-
 if __name__ == "__main__":
     run_cli()
-    def _load_network_filters(self, filters_path: str) -> Dict[str, Any]:
-        """Load network_filters.json, degrading gracefully to an empty config."""
-        path = pathlib.Path(filters_path)
-        if not path.exists():
-            logger.warning(
-                f"Network filters file not found at {path.resolve()}; proceeding without URL filters."
-            )
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError) as err:
-            logger.warning(f"Failed to load network filters from {path}: {err}")
-            return {}
-
-    def _load_canonical_pipeline(self) -> Dict[str, Any]:
-        """Read the target's stored canonical pipeline from SQLite."""
-        try:
-            target = self.db_manager.get_target_by_domain(self.executor.target_domain)
-            if target:
-                pipeline = target.get("canonical_pipeline")
-                if isinstance(pipeline, dict):
-                    return pipeline
-        except Exception as err:
-            logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
-        return {}
-
-    def _resolve_pipeline_key(self, pipeline_value: Any) -> Optional[str]:
-        """Map a canonical-pipeline value to a stored endpoint key.
-
-        The value may be the endpoint key itself (e.g. 'GET_https://...') or a
-        template URL matching an endpoint's template_url.
-        """
-        if not isinstance(pipeline_value, str) or not pipeline_value.strip():
-            return None
-        if pipeline_value in self.endpoints:
-            return pipeline_value
-        for key, info in self.endpoints.items():
-            template = str(info.get("template_url") or "")
-            if template and template == pipeline_value:
-                return key
-        return None

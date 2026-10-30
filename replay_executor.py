@@ -9,10 +9,6 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Set, Union
 
 from database_manager import DatabaseManager
-from heuristic_classifier import AutomatedReplayProber, HeuristicClassifier, RouteTemplateDeducer, NoiseAssistant
-from browser_orchestrator import ChromeOrchestrator
-from cdp_interceptor import NetworkEvent, CDPNetworkInterceptor
-from schema_exporter import SchemaExporter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 

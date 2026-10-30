@@ -36,6 +36,11 @@ class TargetAuditor:
     FIXTURES_ROLES = {"fixtures_list", "live_fixtures", "live_overview", "upcoming_fixtures"}
     ODDS_ROLES = {"odds_detail", "odds", "betting_odds", "live_odds"}
 
+    # URL keywords identifying real fixture endpoints.
+    FIXTURE_URL_KEYWORDS = ("livenow", "liveoverview", "upcoming", "highlights")
+    # URL keywords identifying configuration/system endpoints to ignore.
+    EXCLUDED_URL_KEYWORDS = ("params", "settings", "translations", "auth")
+
     def __init__(
         self,
         target_id: int,
@@ -69,26 +74,44 @@ class TargetAuditor:
                 return key
         return None
 
+    def _get_endpoint_url(self, info: Dict[str, Any]) -> str:
+        """Return the endpoint URL, preferring template_url (the ReplayExecutor key)."""
+        return str(info.get("template_url") or info.get("url") or "").lower()
+
     def _find_fixtures_endpoint(self) -> Optional[str]:
-        """Return a fixtures endpoint, preferring role match, then keyword match."""
-        # First try by role
-        key = self._find_endpoint_by_roles(self.FIXTURES_ROLES)
-        if key:
-            return key
-        # Fallback: by keywords in key or URL
-        keywords = ("livenow", "upcoming", "highlights", "fixtures")
+        """Return a real fixtures endpoint, prioritizing URL keyword matches
+        and explicitly ignoring configuration/system endpoints."""
+        # Priority 1: real fixture endpoints identified by URL keywords.
         for k, info in self.endpoints.items():
-            if any(kw in k.lower() for kw in keywords):
+            url = self._get_endpoint_url(info)
+            if not url:
+                continue
+            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
+                continue
+            if any(kw in url for kw in self.FIXTURE_URL_KEYWORDS):
                 return k
-            url = info.get("url", "")
-            if any(kw in url.lower() for kw in keywords):
+
+        # Priority 2: role-based match, still excluding config/system endpoints.
+        for k, info in self.endpoints.items():
+            url = self._get_endpoint_url(info)
+            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
+                continue
+            if info.get("role") in self.FIXTURES_ROLES:
+                return k
+
+        # Priority 3: keyword match on the endpoint key itself.
+        for k, info in self.endpoints.items():
+            url = self._get_endpoint_url(info)
+            if any(ex in url for ex in self.EXCLUDED_URL_KEYWORDS):
+                continue
+            if any(kw in k.lower() for kw in self.FIXTURE_URL_KEYWORDS):
                 return k
         return None
 
     def _get_fixtures_params(self, fixtures_key: str) -> Dict[str, Any]:
         """Return parameters to pass to the fixtures endpoint, hydrating count/limit placeholders with 10."""
         info = self.endpoints.get(fixtures_key, {})
-        url_template = info.get("url", "")
+        url_template = str(info.get("template_url") or info.get("url") or "")
         params: Dict[str, Any] = {}
 
         # Parse the URL template to find query parameters with placeholders.
@@ -223,7 +246,7 @@ class TargetAuditor:
                 catalog_payload = self.executor.execute(catalog_key)
             except Exception as err:
                 details.append(
-                    f"SKIP: Catalog endpoint '{catalog_key}' failed: {err}"
+                    f"SKIP: Catalog endpoint '{catalog_key}' failed: {self._format_error(err)}"
                 )
             else:
                 if self._is_catalog_payload(catalog_payload):
@@ -248,7 +271,7 @@ class TargetAuditor:
             fixtures_payload = self.executor.execute(fixtures_key, params=fixtures_params)
         except Exception as err:
             details.append(
-                f"FAIL: Live fixtures endpoint '{fixtures_key}' failed: {err}"
+                f"FAIL: Live fixtures endpoint '{fixtures_key}' failed: {self._format_error(err)}"
             )
             return self._build_result("FAIL", 0, "", details)
 
@@ -282,7 +305,7 @@ class TargetAuditor:
             odds_payload = self.executor.execute(odds_key, params={param_name: match_id})
         except Exception as err:
             details.append(
-                f"FAIL: Odds endpoint '{odds_key}' failed with match ID {match_id}: {err}"
+                f"FAIL: Odds endpoint '{odds_key}' failed with match ID {match_id}: {self._format_error(err)}"
             )
             # Verdict is PASS because active fixtures were successfully fetched.
             return self._build_result("PASS", 0, "", details)

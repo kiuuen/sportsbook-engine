@@ -2,6 +2,7 @@ import json
 import logging
 import pathlib
 import re
+import ssl
 import sqlite3
 import urllib.error
 import urllib.parse
@@ -11,6 +12,10 @@ from typing import Any, Dict, List, Optional, Set, Union
 from database_manager import DatabaseManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Unverified SSL context used to bypass [SSL: CERTIFICATE_VERIFY_FAILED]
+# errors on Windows where the system trust store is missing the site CAs.
+_UNVERIFIED_SSL_CONTEXT = ssl._create_unverified_context()
 
 class ReplayExecutionError(RuntimeError):
     """Raised when a replay request fails for a cause that was already logged."""
@@ -388,7 +393,7 @@ class ReplayExecutor:
 
         try:
             req = urllib.request.Request(url=clean_url, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=10.0) as response:
+            with urllib.request.urlopen(req, timeout=10.0, context=_UNVERIFIED_SSL_CONTEXT) as response:
                 status_code = response.status
                 if status_code == 200:
                     body_text = response.read().decode("utf-8", errors="replace")
@@ -462,7 +467,7 @@ class ReplayExecutor:
 
         req = urllib.request.Request(url=hydrated_url, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=12.0) as response:
+            with urllib.request.urlopen(req, timeout=12.0, context=_UNVERIFIED_SSL_CONTEXT) as response:
                 status_code = response.status
                 body_bytes = response.read()
                 body_text = body_bytes.decode("utf-8", errors="replace")
@@ -510,8 +515,8 @@ class ReplayExecutor:
                 response_preview="",
             )
             raise ReplayExecutionError(
-                f"HTTP request failed with status code {status_code}"
-            )
+                f"HTTP request failed with status code {http_err.code}: {http_err.reason}"
+            ) from http_err
 
         except Exception as err:
             self._log_health(
@@ -541,6 +546,16 @@ class ReplayExecutor:
         if header_flags:
             return f'curl -X {method} "{hydrated_url}" {header_flags}'
         return f'curl -X {method} "{hydrated_url}"'
+
+    @staticmethod
+    def _format_error(err: BaseException) -> str:
+        """Flatten an exception and its cause chain into one readable message."""
+        parts: List[str] = [str(err)]
+        cause: Optional[BaseException] = err.__cause__
+        while cause is not None:
+            parts.append(str(cause))
+            cause = cause.__cause__
+        return " -> ".join(part for part in parts if part)
 
     @staticmethod
     def clamp_preview(data: Any, max_lines: int = 10, max_chars: int = 1000) -> str:

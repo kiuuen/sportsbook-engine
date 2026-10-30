@@ -75,6 +75,39 @@ class TargetAuditor:
         if not self.endpoints:
             raise RuntimeError(f"Target {target_id} has no endpoints in its schema.")
 
+        # Central lexicons replace all hardcoded keyword tuples.
+        try:
+            self.lexicon_mgr = LexiconManager("sportsbook_lexicon.json")
+        except Exception as err:
+            raise RuntimeError(f"Failed to load sportsbook lexicon: {err}") from err
+
+        self.network_filters: Dict[str, Any] = self._load_network_filters("network_filters.json")
+
+        filter_url_keywords = {
+            str(kw).lower() for kw in self.network_filters.get("ignored_url_keywords", [])
+        }
+        # URL-level noise rejection: filter file keywords + all lexicon noise terms.
+        self.excluded_url_keywords: Set[str] = filter_url_keywords | self.lexicon_mgr.all_noise_terms
+        # Key/role-level noise rejection: lexicon noise taxonomy only.
+        self.excluded_key_keywords: Set[str] = self.lexicon_mgr.all_noise_terms
+        # Betting-market context keys come from the odds/market lexicon category.
+        self.market_context_keys: Set[str] = self.lexicon_mgr.positive_keywords.get(
+            "betting_markets_and_odds", set()
+        )
+        # Competitor keys are derived from the event-metadata lexicon category,
+        # restricted to terms that semantically denote competing sides.
+        competitor_markers = (
+            "home", "away", "competitor", "participant", "team",
+            "player", "opponent", "guest", "visitor", "host",
+        )
+        event_terms = self.lexicon_mgr.positive_keywords.get("sports_event_metadata", set())
+        self.competitor_keys: Set[str] = {
+            term for term in event_terms if any(marker in term for marker in competitor_markers)
+        }
+
+        # Canonical pipeline priority read from the SQLite control plane.
+        self.canonical_pipeline: Dict[str, Any] = self._load_canonical_pipeline()
+
     def _is_excluded_endpoint(self, key: str, info: Dict[str, Any]) -> bool:
         """Return True for configuration/system endpoints that must be ignored."""
         url = self._get_endpoint_url(info)

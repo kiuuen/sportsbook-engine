@@ -79,7 +79,16 @@ class TargetAuditor:
         except Exception as err:
             raise RuntimeError(f"Failed to load sportsbook lexicon: {err}") from err
 
-        self.network_filters: Dict[str, Any] = self._load_network_filters("network_filters.json")
+        try:
+            with open("network_filters.json", "r", encoding="utf-8") as handle:
+                loaded_filters = json.load(handle)
+            self.network_filters: Dict[str, Any] = loaded_filters if isinstance(loaded_filters, dict) else {}
+        except FileNotFoundError:
+            logger.warning("Network filters file 'network_filters.json' not found; proceeding without URL filters.")
+            self.network_filters = {}
+        except (json.JSONDecodeError, OSError) as err:
+            logger.warning(f"Failed to load network filters: {err}")
+            self.network_filters = {}
 
         filter_url_keywords = {
             str(kw).lower() for kw in self.network_filters.get("ignored_url_keywords", [])
@@ -104,7 +113,16 @@ class TargetAuditor:
         }
 
         # Canonical pipeline priority read from the SQLite control plane.
-        self.canonical_pipeline: Dict[str, Any] = self._load_canonical_pipeline()
+        try:
+            target_row = self.db_manager.get_target_by_domain(self.executor.target_domain)
+            self.canonical_pipeline: Dict[str, Any] = (
+                target_row.get("canonical_pipeline", {}) if isinstance(target_row, dict) else {}
+            )
+            if not isinstance(self.canonical_pipeline, dict):
+                self.canonical_pipeline = {}
+        except Exception as err:
+            logger.warning(f"Failed to load canonical pipeline for target {self.target_id}: {err}")
+            self.canonical_pipeline = {}
 
     def _is_excluded_endpoint(self, key: str, info: Dict[str, Any]) -> bool:
         """Return True for configuration/system endpoints that must be ignored."""

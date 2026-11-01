@@ -72,6 +72,8 @@ class CanonicalEvent:
     start_time: Optional[str]
     raw_label: Optional[str]
     source_provider: str = "unknown"
+    league: Optional[str] = None
+    sport: Optional[str] = None
     markets: List[CanonicalMarket] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -175,6 +177,49 @@ class SafePayloadUtils:
             return None
         text = str(value).strip()
         return text if text else None
+
+class FieldMappingResolver:
+    """Resolves raw payload keys from a target's stored ``field_mappings``.
+
+    Canonical keys (e.g. ``home_team``, ``odds_value``, ``match_container``)
+    are mapped to the raw key names discovered for a specific target during
+    schema discovery. An empty resolver means "no schema knowledge" and every
+    consumer must degrade to lexicon-based semantic matching.
+    """
+
+    ALLOWED_KEYS: Tuple[str, ...] = (
+        "event_id", "home_team", "away_team", "league", "sport", "start_time",
+        "event_label", "match_container", "market_container", "outcome_container",
+        "market_label", "outcome_label", "outcome_id", "odds_value", "line",
+    )
+
+    def __init__(self, mappings: Optional[Dict[str, Any]] = None) -> None:
+        self._mappings: Dict[str, str] = {}
+        self.update(mappings)
+
+    def update(self, mappings: Optional[Dict[str, Any]]) -> None:
+        """Replace the current mappings with a sanitized copy of ``mappings``."""
+        cleaned: Dict[str, str] = {}
+        if isinstance(mappings, dict):
+            for raw_key, raw_value in mappings.items():
+                key = SafePayloadUtils.coerce_str(raw_key)
+                value = SafePayloadUtils.coerce_str(raw_value)
+                if key and value and key.strip().lower() in self.ALLOWED_KEYS:
+                    cleaned[key.strip().lower()] = value.strip()
+        self._mappings = cleaned
+
+    def get(self, canonical_key: str) -> Optional[str]:
+        """Return the raw key mapped to ``canonical_key``, or None."""
+        return self._mappings.get(canonical_key)
+
+    def as_dict(self) -> Dict[str, str]:
+        return dict(self._mappings)
+
+    def __bool__(self) -> bool:
+        return bool(self._mappings)
+
+    def __len__(self) -> int:
+        return len(self._mappings)
 
 
 class OddsConverter:
@@ -321,6 +366,7 @@ class NormalizationContext:
     classifier: MarketClassifier
     converter: OddsConverter
     utils: SafePayloadUtils
+    mappings: FieldMappingResolver = field(default_factory=FieldMappingResolver)
 
 
 class ProviderAdapter:
@@ -368,14 +414,16 @@ class ProviderAdapter:
     # ------------------------------------------------------------------
     def _extract_event_identity(self, node: Any) -> Dict[str, Optional[str]]:
         utils = self.ctx.utils
-        specific_id = utils.coerce_str(utils.find_first(node, self.EVENT_ID_TERMS))
+        specific_id = utils.coerce_str(self._mapped_lookup(node, "event_id", self.EVENT_ID_TERMS))
         generic_id = utils.coerce_str(utils.find_first(node, self.GENERIC_ID_TERMS))
         return {
             "event_id": specific_id or generic_id,
-            "home_team": utils.coerce_str(utils.find_first(node, self.HOME_TERMS)),
-            "away_team": utils.coerce_str(utils.find_first(node, self.AWAY_TERMS)),
-            "start_time": utils.coerce_str(utils.find_first(node, self.START_TERMS)),
-            "raw_label": utils.coerce_str(utils.find_first(node, self.EVENT_LABEL_TERMS)),
+            "home_team": utils.coerce_str(self._mapped_lookup(node, "home_team", self.HOME_TERMS)),
+            "away_team": utils.coerce_str(self._mapped_lookup(node, "away_team", self.AWAY_TERMS)),
+            "start_time": utils.coerce_str(self._mapped_lookup(node, "start_time", self.START_TERMS)),
+            "league": utils.coerce_str(self._mapped_lookup(node, "league", self.LEAGUE_TERMS)),
+            "sport": utils.coerce_str(self._mapped_lookup(node, "sport", self.SPORT_TERMS)),
+            "raw_label": utils.coerce_str(self._mapped_lookup(node, "event_label", self.EVENT_LABEL_TERMS)),
         }
 
     def _looks_like_event(self, node: Any) -> bool:
@@ -398,12 +446,14 @@ class ProviderAdapter:
         ) or self._find_odds_raw(node) is not None
         if not has_outcome_signals:
             return None
-        return self.ctx.utils.coerce_str(self.ctx.utils.find_first(node, self.MARKET_LABEL_TERMS))
+        return self.ctx.utils.coerce_str(
+            self._mapped_lookup(node, "market_label", self.MARKET_LABEL_TERMS)
+        )
 
     def _find_odds_raw(self, node: Any) -> Any:
         if not isinstance(node, dict):
             return None
-        for term in self.ODDS_TERMS:
+        for term in self._odds_candidate_terms():
             if self.ctx.utils.has_key(node, term):
                 value = self.ctx.utils.find_first(node, {term})
                 decimal, fmt = self.ctx.converter.to_decimal(value)
@@ -419,7 +469,7 @@ class ProviderAdapter:
         odds_raw: Any = None
         odds_decimal: Optional[float] = None
         odds_format = "unknown"
-        for term in self.ODDS_TERMS:
+        for term in self._odds_candidate_terms():
             if utils.has_key(node, term):
                 candidate = utils.find_first(node, {term})
                 decimal, fmt = self.ctx.converter.to_decimal(candidate)
@@ -429,9 +479,12 @@ class ProviderAdapter:
         if odds_decimal is None:
             return None
 
-        line_value = utils.coerce_float(utils.find_first(node, self.LINE_TERMS))
-        outcome_label = utils.coerce_str(utils.find_first(node, self.OUTCOME_LABEL_TERMS)) or "unknown_selection"
-        outcome_id = utils.coerce_str(utils.find_first(node, self.OUTCOME_ID_TERMS))
+        line_value = utils.coerce_float(self._mapped_lookup(node, "line", self.LINE_TERMS))
+        outcome_label = (
+            utils.coerce_str(self._mapped_lookup(node, "outcome_label", self.OUTCOME_LABEL_TERMS))
+            or "unknown_selection"
+        )
+        outcome_id = utils.coerce_str(self._mapped_lookup(node, "outcome_id", self.OUTCOME_ID_TERMS))
 
         return CanonicalOutcome(
             label=outcome_label,
@@ -446,15 +499,18 @@ class ProviderAdapter:
         if not isinstance(node, dict):
             return None
         utils = self.ctx.utils
-        raw_label = utils.coerce_str(utils.find_first(node, self.MARKET_LABEL_TERMS)) or fallback_label
+        raw_label = (
+            utils.coerce_str(self._mapped_lookup(node, "market_label", self.MARKET_LABEL_TERMS))
+            or fallback_label
+        )
         canonical_type, confidence = self.ctx.classifier.classify(raw_label)
         market = CanonicalMarket(
             canonical_type=canonical_type,
             raw_label=raw_label,
-            market_id=utils.coerce_str(utils.find_first(node, {"market_id", "id"})),
+            market_id=utils.coerce_str(self._mapped_lookup(node, "market_label", {"market_id", "id"})),
             classification_confidence=confidence,
         )
-        outcome_list = utils.find_first_list(node, self.OUTCOME_LIST_TERMS) or []
+        outcome_list = self._find_container(node, "outcome_container", self.OUTCOME_LIST_TERMS) or []
         for outcome_node in outcome_list:
             outcome = self._build_outcome(outcome_node)
             if outcome is not None:
@@ -475,7 +531,7 @@ class KambiStyleAdapter(ProviderAdapter):
     def can_handle(self, payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
-        betoffers = self.ctx.utils.find_first_list(payload, self.MARKET_LIST_TERMS)
+        betoffers = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS)
         if not betoffers:
             return False
         for betoffer in betoffers[:5]:
@@ -485,7 +541,7 @@ class KambiStyleAdapter(ProviderAdapter):
 
     def normalize(self, payload: Any) -> List[CanonicalEvent]:
         utils = self.ctx.utils
-        events_nodes = utils.find_first_list(payload, self.EVENT_LIST_TERMS)
+        events_nodes = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS)
         if not events_nodes:
             events_nodes = [payload]
 
@@ -501,8 +557,10 @@ class KambiStyleAdapter(ProviderAdapter):
                 start_time=identity["start_time"],
                 raw_label=identity["raw_label"],
                 source_provider=self.name,
+                league=identity.get("league"),
+                sport=identity.get("sport"),
             )
-            betoffers = utils.find_first_list(event_node, self.MARKET_LIST_TERMS) or []
+            betoffers = self._find_container(event_node, "market_container", self.MARKET_LIST_TERMS) or []
             for betoffer in betoffers:
                 market = self._build_market(betoffer)
                 if market is not None:
@@ -521,10 +579,9 @@ class GenericMarketsAdapter(ProviderAdapter):
     def can_handle(self, payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
-        markets = self.ctx.utils.find_first_list(payload, self.MARKET_LIST_TERMS)
-        if markets:
+        if self._find_container(payload, "market_container", self.MARKET_LIST_TERMS):
             return True
-        return bool(self.ctx.utils.find_first_list(payload, self.OUTCOME_LIST_TERMS))
+        return bool(self._find_container(payload, "outcome_container", self.OUTCOME_LIST_TERMS))
 
     def normalize(self, payload: Any) -> List[CanonicalEvent]:
         identity = self._extract_event_identity(payload)
@@ -535,8 +592,10 @@ class GenericMarketsAdapter(ProviderAdapter):
             start_time=identity["start_time"],
             raw_label=identity["raw_label"],
             source_provider=self.name,
+            league=identity.get("league"),
+            sport=identity.get("sport"),
         )
-        markets = self.ctx.utils.find_first_list(payload, self.MARKET_LIST_TERMS) or []
+        markets = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS) or []
         for market_node in markets:
             market = self._build_market(market_node)
             if market is not None:
@@ -560,7 +619,7 @@ class GenericEventsAdapter(ProviderAdapter):
         if isinstance(payload, list):
             return any(isinstance(item, dict) for item in payload)
         if isinstance(payload, dict):
-            events = self.ctx.utils.find_first_list(payload, self.EVENT_LIST_TERMS)
+            events = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS)
             return bool(events)
         return False
 
@@ -569,7 +628,7 @@ class GenericEventsAdapter(ProviderAdapter):
         if isinstance(payload, list):
             event_nodes = list(payload)
         else:
-            found = self.ctx.utils.find_first_list(payload, self.EVENT_LIST_TERMS)
+            found = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS)
             if found:
                 event_nodes = list(found)
 
@@ -585,8 +644,10 @@ class GenericEventsAdapter(ProviderAdapter):
                 start_time=identity["start_time"],
                 raw_label=identity["raw_label"],
                 source_provider=self.name,
+                league=identity.get("league"),
+                sport=identity.get("sport"),
             )
-            market_lists = self.ctx.utils.find_first_list(event_node, self.MARKET_LIST_TERMS) or []
+            market_lists = self._find_container(event_node, "market_container", self.MARKET_LIST_TERMS) or []
             for market_node in market_lists:
                 market = self._build_market(market_node)
                 if market is not None:
@@ -668,6 +729,8 @@ class DeepTraversalAdapter(ProviderAdapter):
             start_time=identity["start_time"],
             raw_label=identity["raw_label"],
             source_provider=self.name,
+            league=identity.get("league"),
+            sport=identity.get("sport"),
         )
         event_index[key] = event
         ordered_events.append(event)
@@ -735,6 +798,48 @@ class OddsNormalizer:
         self._adapters.append(adapter)
         self._sort_adapters()
         logger.info(f"[OddsNormalizer] Registered adapter '{adapter.name}' with priority {adapter.priority}.")
+
+    def set_field_mappings(self, mappings: Optional[Dict[str, Any]]) -> None:
+        """Install (or clear, with ``None``/``{}``) the target's field mappings.
+
+        Mappings take precedence over lexicon-based semantic matching for every
+        canonical key they cover; unmapped keys keep falling back gracefully.
+        """
+        try:
+            self.ctx.mappings.update(mappings)
+            logger.info(
+                f"[OddsNormalizer] Field mappings installed: {self.ctx.mappings.as_dict()}"
+            )
+        except Exception as err:
+            logger.warning(f"[OddsNormalizer] Failed to install field mappings: {err}")
+
+    def load_field_mappings_from_db(self, domain: str, db_manager: "DatabaseManager") -> bool:
+        """Load stored ``field_mappings`` for ``domain`` from the control-plane database.
+
+        Returns True when non-empty mappings were installed; returns False (never
+        raises) when the target is unknown, has no mappings, or the DB fails.
+        """
+        if not isinstance(domain, str) or not domain.strip():
+            logger.warning("[OddsNormalizer] load_field_mappings_from_db requires a non-empty domain.")
+            return False
+        try:
+            target = db_manager.get_target_by_domain(domain.strip())
+        except Exception as err:
+            logger.warning(f"[OddsNormalizer] Failed to read target schema for '{domain}': {err}")
+            return False
+        if not target:
+            logger.warning(f"[OddsNormalizer] No stored target schema for domain '{domain}'.")
+            return False
+        mappings = target.get("field_mappings")
+        if not isinstance(mappings, dict) or not mappings:
+            logger.warning(f"[OddsNormalizer] Target '{domain}' has no usable field_mappings; using lexicon fallback.")
+            self.ctx.mappings.update({})
+            return False
+        self.ctx.mappings.update(mappings)
+        logger.info(
+            f"[OddsNormalizer] Loaded {len(self.ctx.mappings)} field mappings for '{domain}'."
+        )
+        return True
 
     def normalize(self, payload: Any, provider_hint: Optional[str] = None) -> List[CanonicalEvent]:
         """Normalize an arbitrary raw payload into canonical events.
@@ -838,6 +943,24 @@ if __name__ == "__main__":
     }
 
     normalizer = OddsNormalizer("sportsbook_lexicon.json")
+
+    # Schema-driven pass: install the target's discovered field mappings.
+    normalizer.set_field_mappings({
+        "home_team": "homeTeam",
+        "away_team": "awayTeam",
+        "match_container": "events",
+        "market_container": "betOffers",
+        "outcome_container": "outcomes",
+        "odds_value": "odds",
+        "league": "league",
+        "sport": "sport",
+    })
+
     for label, sample in (("kambi_style", SAMPLE_KAMBI_STYLE), ("generic_nested", SAMPLE_GENERIC_NESTED)):
         print(f"\n=== Normalizing sample: {label} ===")
         print(normalizer.normalize_to_json(sample, provider_hint=label))
+
+    # Resilient fallback pass: clear mappings and rely on lexicon matching only.
+    normalizer.set_field_mappings({})
+    print("\n=== Fallback normalization without field mappings (generic_nested) ===")
+    print(normalizer.normalize_to_json(SAMPLE_GENERIC_NESTED))

@@ -26,7 +26,10 @@ class PipelineEngine:
 
     The engine continuously:
       1. Polls live fixtures/overview endpoints to harvest active match/event IDs.
-      2. Polls or streams detailed market/odds endpoints for every active event ID.
+      2. Consumes real-time deltas via :class:`StreamingExecutor` when the
+         target defines streaming endpoints; otherwise falls back to
+         continuous HTTP polling of detail/feed endpoints via
+         :class:`ReplayExecutor`.
       3. Auto-heals expired sessions on HTTP 401/403 via :class:`SessionManager`,
          persisting refreshed credentials to SQLite before resuming.
       4. Applies exponential backoff on rate limits and transient network errors.
@@ -40,6 +43,8 @@ class PipelineEngine:
         detail_poll_interval: Base seconds between detail polling cycles.
         base_backoff: Base delay in seconds for exponential backoff.
         max_backoff: Maximum backoff delay in seconds.
+        request_timeout: Per-request/per-probe timeout in seconds guarding
+            against hung network calls.
     """
 
     def __init__(
@@ -52,6 +57,7 @@ class PipelineEngine:
         detail_poll_interval: float = 5.0,
         base_backoff: float = 2.0,
         max_backoff: float = 60.0,
+        request_timeout: float = 30.0,
     ) -> None:
         self.target_domain = target_domain
         self.db_manager = db_manager if db_manager else DatabaseManager()
@@ -64,6 +70,7 @@ class PipelineEngine:
         self.detail_poll_interval = max(float(detail_poll_interval), 1.0)
         self.base_backoff = max(float(base_backoff), 0.5)
         self.max_backoff = max(float(max_backoff), self.base_backoff)
+        self.request_timeout = max(float(request_timeout), 1.0)
 
         self._active_entity_ids: Dict[str, Set[Any]] = {}
         self._shutdown_event = asyncio.Event()
@@ -188,6 +195,36 @@ class PipelineEngine:
             )
             return None
 
+    def _build_streaming_executor(self) -> Optional[StreamingExecutor]:
+        """Build a StreamingExecutor, returning None when unavailable.
+
+        Targets without streaming endpoints (HTTP-only) are fully supported:
+        construction failures or missing streaming data are logged and the
+        engine continues in HTTP-polling mode.
+        """
+        try:
+            return StreamingExecutor(
+                target_domain=self.target_domain,
+                db_manager=self.db_manager,
+            )
+        except Exception as err:
+            logger.warning(
+                f"[PipelineEngine] StreamingExecutor unavailable for "
+                f"'{self.target_domain}' (falling back to HTTP polling): {err}"
+            )
+            return None
+        """Build a fresh ReplayExecutor, returning None on unrecoverable load errors."""
+        try:
+            return ReplayExecutor(
+                schema_source=self.target_domain, db_manager=self.db_manager
+            )
+        except Exception as err:
+            logger.error(
+                f"[PipelineEngine] Failed to build ReplayExecutor for "
+                f"'{self.target_domain}': {err}"
+            )
+            return None
+
     def _update_active_entity_ids(
         self, endpoint_key: str, executor: ReplayExecutor, response: Any
     ) -> None:
@@ -294,7 +331,10 @@ class PipelineEngine:
                 if self._shutdown_event.is_set():
                     break
                 try:
-                    response = await asyncio.to_thread(executor.execute, key)
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(executor.execute, key),
+                        timeout=self.request_timeout,
+                    )
                     self._update_active_entity_ids(key, executor, response)
                     new_ids = self._harvest_event_ids(executor, key, response)
                     self._reset_backoff(key)
@@ -309,7 +349,7 @@ class PipelineEngine:
             await self._sleep_or_shutdown(self.harvest_interval)
 
     async def _detail_loop(
-        self, endpoint_key: str, streaming_executor: StreamingExecutor
+        self, endpoint_key: str, streaming_executor: Optional[StreamingExecutor]
     ) -> None:
         """Poll or stream a detail endpoint for every active event ID."""
         local_generation = -1
@@ -330,27 +370,36 @@ class PipelineEngine:
 
             try:
                 if protocol == "websocket":
-                    try:
-                        success = await streaming_executor.probe()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:
+                    if streaming_executor is None:
                         logger.warning(
-                            f"[PipelineEngine] Streaming handshake disrupted for "
-                            f"'{endpoint_key}': {err}"
-                        )
-                        success = False
-                    if success:
-                        self._reset_backoff(endpoint_key)
-                        logger.info(
-                            f"[PipelineEngine] Streaming probe succeeded for '{endpoint_key}'."
-                        )
-                    else:
-                        logger.warning(
-                            f"[PipelineEngine] Streaming probe failed for "
+                            f"[PipelineEngine] No streaming executor available for "
                             f"'{endpoint_key}'; will retry with backoff."
                         )
                         self._register_backoff(endpoint_key)
+                    else:
+                        try:
+                            success = await asyncio.wait_for(
+                                streaming_executor.probe(), timeout=self.request_timeout
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as err:
+                            logger.warning(
+                                f"[PipelineEngine] Streaming handshake disrupted for "
+                                f"'{endpoint_key}': {err}"
+                            )
+                            success = False
+                        if success:
+                            self._reset_backoff(endpoint_key)
+                            logger.info(
+                                f"[PipelineEngine] Streaming probe succeeded for '{endpoint_key}'."
+                            )
+                        else:
+                            logger.warning(
+                                f"[PipelineEngine] Streaming probe failed for "
+                                f"'{endpoint_key}'; will retry with backoff."
+                            )
+                            self._register_backoff(endpoint_key)
                 else:
                     event_ids = self._snapshot_event_ids(required_params)
                     if not event_ids:
@@ -363,8 +412,9 @@ class PipelineEngine:
                             break
                         params = self._build_params(required_params, event_id)
                         try:
-                            response = await asyncio.to_thread(
-                                executor.execute, endpoint_key, params
+                            response = await asyncio.wait_for(
+                                asyncio.to_thread(executor.execute, endpoint_key, params),
+                                timeout=self.request_timeout,
                             )
                             self._update_active_entity_ids(endpoint_key, executor, response)
                             self._reset_backoff(endpoint_key)
@@ -410,12 +460,17 @@ class PipelineEngine:
 
     async def _run_pipeline(self) -> None:
         """Launch harvest and detail worker tasks and wait for shutdown."""
-        streaming_executor = StreamingExecutor(
-            target_domain=self.target_domain,
-            db_manager=self.db_manager,
-        )
         executor = self._build_replay_executor()
         harvest_keys, detail_keys = self._classify_endpoints(executor)
+
+        streaming_executor: Optional[StreamingExecutor] = None
+        has_streaming = any(
+            str((executor.endpoints.get(key, {}) or {}).get("protocol", "")).lower()
+            == "websocket"
+            for key in detail_keys
+        ) if executor is not None else False
+        if has_streaming:
+            streaming_executor = self._build_streaming_executor()
 
         if executor is None:
             logger.error(

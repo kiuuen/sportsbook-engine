@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from browser_orchestrator import ChromeOrchestrator
 from cdp_interceptor import CDPNetworkInterceptor, NetworkEvent
+from database_manager import DatabaseManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 

@@ -8,7 +8,6 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cdp_interceptor import NetworkEvent, CDPNetworkInterceptor
-from heuristic_classifier import ClassificationResult, HeuristicClassifier, RouteTemplateDeducer, AutomatedReplayProber, NoiseAssistant
 from browser_orchestrator import ChromeOrchestrator
 from database_manager import DatabaseManager
 
@@ -32,14 +31,17 @@ class SchemaExporter:
     def __init__(
         self,
         base_output_dir: str = "./data/schemas",
-        classifier: Optional[HeuristicClassifier] = None,
+        classifier: Optional[Any] = None,
     ) -> None:
         self.output_dir: pathlib.Path = pathlib.Path(base_output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.classifier: Optional[Any] = None
         if classifier is not None:
-            self.classifier: Optional[HeuristicClassifier] = classifier
+            self.classifier = classifier
         else:
             try:
+                # Deferred import to avoid a circular dependency with heuristic_classifier.
+                from heuristic_classifier import HeuristicClassifier
                 self.classifier = HeuristicClassifier("sportsbook_lexicon.json")
             except Exception as err:
                 logging.error(f"[SchemaExporter] Failed to initialize HeuristicClassifier: {err}")
@@ -131,7 +133,7 @@ class SchemaExporter:
             return data
 
     @staticmethod
-    def _evaluate_live_classification(result: ClassificationResult) -> Tuple[bool, str]:
+    def _evaluate_live_classification(result: Any) -> Tuple[bool, str]:
         """Decide whether a live-probed payload contains real betting signals.
 
         An endpoint is accepted only when the live response contains structural
@@ -289,7 +291,7 @@ class SchemaExporter:
     def build_schema_dict(
         self,
         target_url: str,
-        classified_results: List[ClassificationResult],
+        classified_results: List[Any],
         events: List[NetworkEvent],
     ) -> Dict[str, Any]:
         """
@@ -445,7 +447,7 @@ class SchemaExporter:
     def export_schema(
         self,
         target_url: str,
-        classified_results: List[ClassificationResult],
+        classified_results: List[Any],
         events: List[NetworkEvent],
         db_manager: Optional[DatabaseManager] = None,
     ) -> Tuple[pathlib.Path, Optional[int]]:
@@ -470,6 +472,14 @@ if __name__ == "__main__":
     import asyncio
 
     async def run_live_test_harness() -> None:
+        # Deferred import: safe here because this module only runs as a script,
+        # after heuristic_classifier is fully importable.
+        from heuristic_classifier import (
+            HeuristicClassifier,
+            RouteTemplateDeducer,
+            AutomatedReplayProber,
+            NoiseAssistant,
+        )
         print("\n=======================================================")
         print("  LIVE SPORTSBOOK API HEURISTIC CLASSIFIER HARNESS")
         print("=======================================================\n")

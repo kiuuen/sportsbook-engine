@@ -11,6 +11,8 @@ from cdp_interceptor import NetworkEvent, CDPNetworkInterceptor
 from browser_orchestrator import ChromeOrchestrator
 from database_manager import DatabaseManager
 
+from schema_exporter import SchemaExporter
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 

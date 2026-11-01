@@ -890,16 +890,25 @@ if __name__ == "__main__":
                     target_url=target_url,
                 )
 
-                # Export validated blueprint schema to JSON file
+                # Export validated blueprint schema to JSON file and persist to SQLite
                 try:
-                    exporter = SchemaExporter()
-                    saved_path = exporter.export_schema(
+                    db_manager = DatabaseManager()
+                    exporter = SchemaExporter(classifier=classifier)
+                    saved_path, target_id = exporter.export_schema(
                         target_url=target_url,
                         classified_results=results,
                         events=events,
+                        db_manager=db_manager,
                     )
                     if saved_path is not None:
                         print(f"\n[+] Schema successfully exported to: {saved_path.resolve()}")
+                    if target_id is not None:
+                        logging.info(
+                            f"[+] Target '{target_url}' persisted into SQLite with target_id={target_id}."
+                        )
+                        print(f"[+] Schema persisted into SQLite with target_id={target_id}.")
+                    else:
+                        logging.warning("[!] Schema export succeeded but no target_id was returned; SQLite persistence skipped.")
                 except Exception as err:
                     logging.error(f"[Exporter Error] Failed to export schema: {err}", exc_info=True)
 

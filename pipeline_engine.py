@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import signal
+import sqlite3
+import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database_manager import DatabaseManager
@@ -483,13 +485,70 @@ class PipelineEngine:
 
 if __name__ == "__main__":
 
-    async def main() -> None:
-        target_domain = "example.com"
-        pipeline_engine = PipelineEngine(target_domain=target_domain)
+    def _select_target_domain() -> Optional[str]:
+        """Resolve the target domain from CLI arguments or interactive selection.
+
+        Returns:
+            The selected domain, or None when no valid target could be resolved.
+        """
+        args = sys.argv[1:]
+        if args:
+            domain = args[0].strip()
+            if domain:
+                return domain
+            print("[!] Empty domain argument provided.", file=sys.stderr)
+            return None
+
+        db_manager = DatabaseManager()
         try:
-            await pipeline_engine.start()
+            try:
+                conn = db_manager.get_connection()
+                rows = conn.execute("SELECT domain FROM targets ORDER BY id ASC").fetchall()
+            except sqlite3.Error as err:
+                print(f"[!] Failed to query stored targets: {err}", file=sys.stderr)
+                return None
+            domains: List[str] = [str(row["domain"]) for row in rows]
+        finally:
+            db_manager.close()
+
+        if not domains:
+            print("[!] No stored targets found in the control plane database.", file=sys.stderr)
+            return None
+
+        print("[*] Available targets:")
+        for idx, name in enumerate(domains, start=1):
+            print(f"    {idx}. {name}")
+
+        try:
+            raw = input(f"Select a target [1-{len(domains)}, default=1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[!] Target selection aborted.", file=sys.stderr)
+            return None
+
+        if not raw:
+            chosen_index = 1
+        else:
+            try:
+                chosen_index = int(raw)
+            except ValueError:
+                print(f"[!] Invalid selection '{raw}'; aborting.", file=sys.stderr)
+                return None
+
+        if not 1 <= chosen_index <= len(domains):
+            print(f"[!] Selection out of range: {chosen_index}", file=sys.stderr)
+            return None
+
+        return domains[chosen_index - 1]
+
+    def main() -> None:
+        domain = _select_target_domain()
+        if domain is None:
+            sys.exit(1)
+        logger.info(f"[PipelineEngine] Using target domain: {domain}")
+        engine = PipelineEngine(target_domain=domain)
+        try:
+            asyncio.run(engine.start())
         except KeyboardInterrupt:
             logger.info("[PipelineEngine] Keyboard interrupt received; shutting down.")
-            await pipeline_engine.stop()
 
-    asyncio.run(main())
+    main()

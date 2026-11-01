@@ -72,10 +72,20 @@ class DatabaseManager:
                     provider_family TEXT NOT NULL,
                     discovered_at TEXT NOT NULL,
                     canonical_pipeline_json TEXT NOT NULL,
+                    field_mappings_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
             """)
+
+            # Schema migration: add field_mappings_json to databases created
+            # before this column existed.
+            columns = conn.execute("PRAGMA table_info(targets)").fetchall()
+            column_names = {col["name"] for col in columns}
+            if "field_mappings_json" not in column_names:
+                conn.execute(
+                    "ALTER TABLE targets ADD COLUMN field_mappings_json TEXT NOT NULL DEFAULT '{}';"
+                )
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -141,22 +151,25 @@ class DatabaseManager:
         provider_family: str,
         discovered_at: str,
         canonical_pipeline: Dict[str, Any],
+        field_mappings: Optional[Dict[str, str]] = None,
     ) -> int:
         conn = self.get_connection()
         now = self._utc_now_iso()
         pipeline_json = json.dumps(canonical_pipeline)
+        mappings_json = json.dumps(field_mappings if isinstance(field_mappings, dict) else {})
 
         query = """
-            INSERT INTO targets (domain, provider_family, discovered_at, canonical_pipeline_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO targets (domain, provider_family, discovered_at, canonical_pipeline_json, field_mappings_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(domain) DO UPDATE SET
                 provider_family = EXCLUDED.provider_family,
                 discovered_at = EXCLUDED.discovered_at,
                 canonical_pipeline_json = EXCLUDED.canonical_pipeline_json,
+                field_mappings_json = EXCLUDED.field_mappings_json,
                 updated_at = EXCLUDED.updated_at;
         """
         with conn:
-            conn.execute(query, (domain, provider_family, discovered_at, pipeline_json, now, now))
+            conn.execute(query, (domain, provider_family, discovered_at, pipeline_json, mappings_json, now, now))
             row = conn.execute("SELECT id FROM targets WHERE domain = ?", (domain,)).fetchone()
             if not row:
                 raise RuntimeError(f"Failed to retrieve target ID for domain: {domain}")
@@ -272,7 +285,12 @@ class DatabaseManager:
         discovered_at = schema_data.get("discovered_at", self._utc_now_iso())
         canonical_pipeline = schema_data.get("canonical_pipeline", {})
 
-        target_id = self.upsert_target(domain, provider_family, discovered_at, canonical_pipeline)
+        field_mappings = schema_data.get("field_mappings", {})
+        if not isinstance(field_mappings, dict):
+            field_mappings = {}
+        target_id = self.upsert_target(
+            domain, provider_family, discovered_at, canonical_pipeline, field_mappings=field_mappings
+        )
 
         session_data = schema_data.get("session", {})
         self.upsert_session(
@@ -303,6 +321,7 @@ class DatabaseManager:
             return None
         res = dict(row)
         res["canonical_pipeline"] = self._safe_json_loads(res.get("canonical_pipeline_json"), {})
+        res["field_mappings"] = self._safe_json_loads(res.get("field_mappings_json"), {})
         return res
 
     def get_session_by_target_id(self, target_id: int) -> Optional[Dict[str, Any]]:
@@ -467,6 +486,12 @@ if __name__ == "__main__":
                 "upcoming_fixtures": None,
                 "match_detail_metrics": None,
             },
+            "field_mappings": {
+                "home_team": "home",
+                "away_team": "away",
+                "odds_value": "cf",
+                "match_container": "events",
+            },
             "dependency_graph": {
                 "producers": {"sport_id": ["GET_https://api.sportsbook_example.com/v1/sports"]},
                 "consumers": {"GET_https://api.sportsbook_example.com/v1/live": ["sport_id"]},
@@ -510,6 +535,8 @@ if __name__ == "__main__":
         target_record = db.get_target_by_domain("sportsbook_example.com")
         assert target_record is not None, "Target record should exist"
         print(f"[+] Retrieved Target Domain: {target_record['domain']}, Provider: {target_record['provider_family']}")
+        assert target_record.get("field_mappings"), "Field mappings should be persisted"
+        print(f"[+] Retrieved Field Mappings: {target_record['field_mappings']}")
 
         print("[*] Retrieving persisted session...")
         session_record = db.get_session_by_target_id(target_id)

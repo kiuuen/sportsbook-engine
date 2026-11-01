@@ -760,12 +760,15 @@ class NoiseAssistant:
         else:
             print("[*] Skipped adding noise domains.")
 
-from schema_exporter import SchemaExporter
 
 if __name__ == "__main__":
     import asyncio
 
     async def run_live_test_harness() -> None:
+        # Deferred import: safe here because this only runs as a script,
+        # after both modules are fully loaded, avoiding a circular import.
+        from schema_exporter import SchemaExporter
+
         print("\n=======================================================")
         print("  LIVE SPORTSBOOK API HEURISTIC CLASSIFIER HARNESS")
         print("=======================================================\n")

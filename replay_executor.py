@@ -17,6 +17,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # errors on Windows where the system trust store is missing the site CAs.
 _UNVERIFIED_SSL_CONTEXT = ssl._create_unverified_context()
 
+# Maximum number of parent-endpoint chaining levels allowed when resolving
+# dynamic parameters, preventing circular/infinite recursion between endpoints.
+_MAX_CHAIN_DEPTH: int = 3
+
 class ReplayExecutionError(RuntimeError):
     """Raised when a replay request fails for a cause that was already logged."""
 
@@ -361,7 +365,15 @@ class ReplayExecutor:
             for item in node:
                 self._harvest_identifiers(item, target_params, harvested)
 
-    def _resolve_dynamic_params(self, endpoint_key: str, provided_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _resolve_dynamic_params(
+        self,
+        endpoint_key: str,
+        provided_params: Optional[Dict[str, Any]] = None,
+        visited: Optional[Set[str]] = None,
+        depth: int = 0,
+    ) -> Dict[str, Any]:
+        visited = visited if visited is not None else set()
+        visited.add(endpoint_key)
         endpoint_info = self.endpoints.get(endpoint_key, {})
         required_params = endpoint_info.get("dynamic_parameters", [])
         resolved: Dict[str, Any] = dict(provided_params) if provided_params else {}
@@ -370,26 +382,52 @@ class ReplayExecutor:
         if not missing_params:
             return resolved
 
-        # Identify parent producer endpoints (preferring producers mapped in dependency_graph, then catalog_root/fixtures_list)
+        # Stop chaining when the maximum depth has been reached.
+        if depth >= _MAX_CHAIN_DEPTH:
+            logging.warning(
+                f"[ReplayExecutor] Max chain depth {_MAX_CHAIN_DEPTH} reached at "
+                f"'{endpoint_key}'; returning resolved params as-is."
+            )
+            return resolved
+
+        # Identify parent producer endpoints (preferring producers mapped in
+        # dependency_graph, then catalog_root/fixtures_list), skipping any
+        # endpoint already visited in the current chain to prevent cycles.
         parent_candidates: List[str] = []
         producers_map = self.dependency_graph.get("producers", {})
         for param in missing_params:
             if param in producers_map:
                 for producer_key in producers_map[param]:
-                    if producer_key not in parent_candidates and producer_key != endpoint_key:
+                    if (
+                        producer_key not in parent_candidates
+                        and producer_key != endpoint_key
+                        and producer_key not in visited
+                    ):
                         parent_candidates.append(producer_key)
 
         for parent_key, parent_info in self.endpoints.items():
-            if parent_key == endpoint_key or parent_key in parent_candidates:
+            if (
+                parent_key == endpoint_key
+                or parent_key in parent_candidates
+                or parent_key in visited
+            ):
                 continue
             role = parent_info.get("role", "")
             if role in ("catalog_root", "fixtures_list"):
                 parent_candidates.append(parent_key)
 
         for parent_key in parent_candidates:
+            if parent_key in visited:
+                continue
+            visited.add(parent_key)
             try:
-                logging.info(f"[ReplayExecutor] Chaining execution: resolving {missing_params} via parent '{parent_key}'...")
-                parent_response = self.execute(parent_key)
+                logging.info(
+                    f"[ReplayExecutor] Chaining execution: resolving {missing_params} "
+                    f"via parent '{parent_key}' (depth {depth + 1})..."
+                )
+                parent_response = self.execute(
+                    parent_key, visited=visited, depth=depth + 1
+                )
                 harvested: Dict[str, List[Any]] = {}
                 self._harvest_identifiers(parent_response, set(missing_params), harvested)
 
@@ -402,7 +440,9 @@ class ReplayExecutor:
                 if not missing_params:
                     break
             except Exception as err:
-                logging.warning(f"[ReplayExecutor] Failed harvesting from parent '{parent_key}': {err}")
+                logging.warning(
+                    f"[ReplayExecutor] Failed harvesting from parent '{parent_key}': {err}"
+                )
 
         return resolved
 
@@ -486,13 +526,19 @@ class ReplayExecutor:
             return False
 
     def execute(
-        self, endpoint_key: str, params: Optional[Dict[str, Any]] = None
+        self,
+        endpoint_key: str,
+        params: Optional[Dict[str, Any]] = None,
+        visited: Optional[Set[str]] = None,
+        depth: int = 0,
     ) -> Any:
         endpoint_info = self.endpoints.get(endpoint_key)
         if not endpoint_info:
             raise KeyError(f"Endpoint '{endpoint_key}' not present in loaded schema.")
 
-        resolved_params = self._resolve_dynamic_params(endpoint_key, params)
+        resolved_params = self._resolve_dynamic_params(
+            endpoint_key, params, visited=visited, depth=depth
+        )
         template_url = endpoint_info.get("template_url", "")
         method = endpoint_info.get("method", "GET")
         hydrated_url = self.hydrate_url(template_url, resolved_params)

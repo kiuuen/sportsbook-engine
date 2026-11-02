@@ -35,6 +35,7 @@ class ClassificationResult:
     volatility: str = "static"
     produced_params: List[str] = field(default_factory=list)
     is_auxiliary_widget: bool = False
+    field_mappings: Dict[str, str] = field(default_factory=dict)
 
 
 class LexiconManager:
@@ -169,6 +170,17 @@ class RouteTemplateDeducer:
 
 
 class HeuristicClassifier:
+
+    CANONICAL_FIELD_ROLES: Dict[str, Tuple[str, ...]] = {
+        "home_team": ("home_team", "home_competitor"),
+        "away_team": ("away_team", "away_competitor"),
+        "league": ("league", "league_id", "tournament", "tournament_id", "competition", "championship"),
+        "sport": ("sport", "sport_id", "sport_key", "sport_name"),
+        "event_id": ("event_id", "match_id", "fixture_id", "game_id"),
+        "market_id": ("market_id", "market_type", "market_name"),
+        "odds_value": ("odds", "price", "prices", "decimal_odds", "over_price", "under_price"),
+        "commence_time": ("commence_time", "start_time", "kickoff", "scheduled_at", "event_date"),
+    }
 
     CATEGORY_WEIGHTS: Dict[str, float] = {
         "betting_markets_and_odds": 36.0,
@@ -314,6 +326,42 @@ class HeuristicClassifier:
 
     def _is_american_odds(self, val: float) -> bool:
         return (val <= -100 or val >= 100) and val == math.floor(val) and abs(val) <= 50000
+
+    def _infer_field_mappings(
+        self,
+        keys_found: List[str],
+        contextual_numerics: List[Tuple[str, float]],
+    ) -> Dict[str, str]:
+        """Infer a lightweight canonical-to-raw field mapping from observed keys.
+
+        Roles are resolved by matching raw keys (or their tokens) against the
+        sportsbook lexicon. Unknown or generic keys are ignored; the first
+        matching raw key wins for each canonical role.
+        """
+        mappings: Dict[str, str] = {}
+        claimed_keys: Set[str] = set()
+
+        for canonical_role, lexicon_terms in self.CANONICAL_FIELD_ROLES.items():
+            for raw_key in keys_found:
+                if raw_key in claimed_keys or self.lexicon_mgr.is_generic_or_blacklisted(raw_key):
+                    continue
+                key_tokens = {t for t in re.split(r"[_\-\s\.]", raw_key) if t}
+                if any(term == raw_key or term in key_tokens for term in lexicon_terms):
+                    mappings[canonical_role] = raw_key
+                    claimed_keys.add(raw_key)
+                    break
+
+        # Fallback: infer odds_value from numeric values under odds-related keys
+        if "odds_value" not in mappings:
+            core_terms = self.lexicon_mgr.positive_keywords.get("betting_markets_and_odds", set())
+            for parent_key, val in contextual_numerics:
+                if self._is_decimal_odds(val) or self._is_american_odds(val):
+                    key_tokens = set(re.split(r"[_\-\s\.]", parent_key))
+                    if any(term in parent_key or term in key_tokens for term in core_terms):
+                        mappings["odds_value"] = parent_key
+                        break
+
+        return mappings
 
     def _extract_produced_identifiers(self, keys_found: List[str]) -> List[str]:
         identifier_keys: Set[str] = set()
@@ -630,6 +678,7 @@ class HeuristicClassifier:
             is_viable=is_composite_confident,
             role=role,
             volatility=volatility,
+            field_mappings=field_mappings,
             produced_params=produced_params,
             is_auxiliary_widget=is_auxiliary_widget,
         )

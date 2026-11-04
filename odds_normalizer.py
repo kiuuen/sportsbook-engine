@@ -397,6 +397,9 @@ class ProviderAdapter:
     OUTCOME_LIST_TERMS: Set[str] = {"outcomes", "outcome", "selections", "selection", "runners", "runner"}
     EVENT_LIST_TERMS: Set[str] = {"events", "fixtures", "matches"}
 
+    LEAGUE_TERMS: Set[str] = {"league", "league_id", "competition", "tournament"}
+    SPORT_TERMS: Set[str] = {"sport", "sport_id", "sport_key", "sport_name"}
+
     def __init__(self, ctx: NormalizationContext) -> None:
         self.ctx = ctx
 
@@ -413,6 +416,72 @@ class ProviderAdapter:
     # Shared defensive extraction helpers available to all adapters.
     # ------------------------------------------------------------------
     def _extract_event_identity(self, node: Any) -> Dict[str, Optional[str]]:
+        utils = self.ctx.utils
+        specific_id = utils.coerce_str(self._mapped_lookup(node, "event_id", self.EVENT_ID_TERMS))
+        generic_id = utils.coerce_str(utils.find_first(node, self.GENERIC_ID_TERMS))
+        return {
+            "event_id": specific_id or generic_id,
+            "home_team": utils.coerce_str(self._mapped_lookup(node, "home_team", self.HOME_TERMS)),
+            "away_team": utils.coerce_str(self._mapped_lookup(node, "away_team", self.AWAY_TERMS)),
+            "start_time": utils.coerce_str(self._mapped_lookup(node, "start_time", self.START_TERMS)),
+            "league": utils.coerce_str(self._mapped_lookup(node, "league", self.LEAGUE_TERMS)),
+            "sport": utils.coerce_str(self._mapped_lookup(node, "sport", self.SPORT_TERMS)),
+            "raw_label": utils.coerce_str(self._mapped_lookup(node, "event_label", self.EVENT_LABEL_TERMS)),
+        }
+
+    def _mapped_lookup(self, node: Any, canonical_key: str, fallback_terms: Set[str]) -> Any:
+        """Resolve a canonical key via stored field mappings, else semantic fallback."""
+        if not isinstance(node, dict):
+            return None
+        mapped_key = self.ctx.mappings.get(canonical_key)
+        if mapped_key:
+            value = self._direct_key_lookup(node, mapped_key)
+            if value is not None:
+                return self._unwrap_named(value)
+        return self.ctx.utils.find_first(node, fallback_terms)
+
+    @staticmethod
+    def _direct_key_lookup(node: Dict[str, Any], raw_key: str) -> Any:
+        """Exact-match then token-subset lookup for a raw mapped key at this level."""
+        if raw_key in node:
+            return node[raw_key]
+        for key, value in node.items():
+            if SafePayloadUtils.key_matches(key, raw_key):
+                return value
+        return None
+
+    @staticmethod
+    def _unwrap_named(value: Any) -> Any:
+        """Unwrap nested ``{"name": ...}``-style objects produced by mapped keys."""
+        if isinstance(value, dict):
+            for name_key in ("name", "label", "title"):
+                if name_key in value and value[name_key] is not None:
+                    return value[name_key]
+        return value
+
+    def _find_container(self, node: Any, canonical_key: str, terms: Set[str]) -> Optional[List[Any]]:
+        """Resolve a list container via field mappings, else lexicon-based BFS."""
+        mapped_key = self.ctx.mappings.get(canonical_key)
+        if mapped_key and isinstance(node, dict):
+            value = self._direct_key_lookup(node, mapped_key)
+            if isinstance(value, list):
+                return value
+        return self.ctx.utils.find_first_list(node, terms)
+
+    def _odds_candidate_terms(self) -> Tuple[str, ...]:
+        """Odds key candidates, prioritizing the schema-mapped key when present."""
+        mapped = self.ctx.mappings.get("odds_value")
+        if mapped:
+            return (mapped,) + self.ODDS_TERMS
+        return self.ODDS_TERMS
+
+    def _lookup_by_term(self, node: Any, term: str) -> Any:
+        """Direct mapped-key lookup first, then depth-limited semantic search."""
+        if isinstance(node, dict):
+            direct = self._direct_key_lookup(node, term)
+            if direct is not None:
+                return direct
+        return self.ctx.utils.find_first(node, {term})
         utils = self.ctx.utils
         specific_id = utils.coerce_str(self._mapped_lookup(node, "event_id", self.EVENT_ID_TERMS))
         generic_id = utils.coerce_str(utils.find_first(node, self.GENERIC_ID_TERMS))
@@ -455,7 +524,7 @@ class ProviderAdapter:
             return None
         for term in self._odds_candidate_terms():
             if self.ctx.utils.has_key(node, term):
-                value = self.ctx.utils.find_first(node, {term})
+                value = self._lookup_by_term(node, term)
                 decimal, fmt = self.ctx.converter.to_decimal(value)
                 if decimal is not None:
                     return value
@@ -471,7 +540,7 @@ class ProviderAdapter:
         odds_format = "unknown"
         for term in self._odds_candidate_terms():
             if utils.has_key(node, term):
-                candidate = utils.find_first(node, {term})
+                candidate = self._lookup_by_term(node, term)
                 decimal, fmt = self.ctx.converter.to_decimal(candidate)
                 if decimal is not None:
                     odds_raw, odds_decimal, odds_format = candidate, decimal, fmt
@@ -765,7 +834,11 @@ class DeepTraversalAdapter(ProviderAdapter):
 class OddsNormalizer:
     """Facade orchestrating adapter selection and canonical normalization."""
 
-    def __init__(self, lexicon_path: str = "sportsbook_lexicon.json") -> None:
+    def __init__(
+        self,
+        lexicon_path: str = "sportsbook_lexicon.json",
+        field_mappings: Optional[Dict[str, Any]] = None,
+    ) -> None:
         try:
             self.lexicon_mgr: Optional[LexiconManager] = LexiconManager(lexicon_path)
         except Exception as err:
@@ -778,6 +851,8 @@ class OddsNormalizer:
             converter=OddsConverter(),
             utils=SafePayloadUtils(),
         )
+        if field_mappings is not None:
+            self.set_field_mappings(field_mappings)
         self._adapters: List[ProviderAdapter] = []
         self._register_default_adapters()
 
@@ -841,7 +916,12 @@ class OddsNormalizer:
         )
         return True
 
-    def normalize(self, payload: Any, provider_hint: Optional[str] = None) -> List[CanonicalEvent]:
+    def normalize(
+        self,
+        payload: Any,
+        provider_hint: Optional[str] = None,
+        field_mappings: Optional[Dict[str, Any]] = None,
+    ) -> List[CanonicalEvent]:
         """Normalize an arbitrary raw payload into canonical events.
 
         Args:
@@ -855,32 +935,51 @@ class OddsNormalizer:
         if parsed is None:
             return []
 
-        hint = (provider_hint or "").strip().lower()
-        ordered = list(self._adapters)
-        if hint:
-            ordered.sort(key=lambda a: (0 if hint in a.name.lower() else 1, a.priority))
-
-        for adapter in ordered:
+        previous_mappings = self.ctx.mappings.as_dict()
+        if field_mappings is not None:
             try:
-                if not adapter.can_handle(parsed):
-                    continue
-                results = adapter.normalize(parsed)
-                if results:
-                    logger.info(
-                        f"[OddsNormalizer] Adapter '{adapter.name}' normalized "
-                        f"{len(results)} canonical event(s)."
-                    )
-                    return results
+                self.ctx.mappings.update(field_mappings)
             except Exception as err:
-                logger.warning(f"[OddsNormalizer] Adapter '{adapter.name}' failed: {err}")
-                continue
+                logger.warning(f"[OddsNormalizer] Invalid field_mappings ignored: {err}")
+
+        try:
+            hint = (provider_hint or "").strip().lower()
+            ordered = list(self._adapters)
+            if hint:
+                ordered.sort(key=lambda a: (0 if hint in a.name.lower() else 1, a.priority))
+
+            for adapter in ordered:
+                try:
+                    if not adapter.can_handle(parsed):
+                        continue
+                    results = adapter.normalize(parsed)
+                    if results:
+                        logger.info(
+                            f"[OddsNormalizer] Adapter '{adapter.name}' normalized "
+                            f"{len(results)} canonical event(s)."
+                        )
+                        return results
+                except Exception as err:
+                    logger.warning(f"[OddsNormalizer] Adapter '{adapter.name}' failed: {err}")
+                    continue
+        finally:
+            # Always restore the prior mapping scope so per-call mappings never leak.
+            self.ctx.mappings.update(previous_mappings)
 
         logger.warning("[OddsNormalizer] No adapter could extract canonical events from the payload.")
         return []
 
-    def normalize_to_json(self, payload: Any, provider_hint: Optional[str] = None, indent: int = 2) -> str:
+    def normalize_to_json(
+        self,
+        payload: Any,
+        provider_hint: Optional[str] = None,
+        indent: int = 2,
+        field_mappings: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Normalize a payload and serialize the canonical result to JSON text."""
-        events = self.normalize(payload, provider_hint=provider_hint)
+        events = self.normalize(
+            payload, provider_hint=provider_hint, field_mappings=field_mappings
+        )
         return json.dumps([e.to_dict() for e in events], indent=indent, ensure_ascii=False)
 
     def _coerce_payload(self, payload: Any) -> Any:
@@ -958,7 +1057,7 @@ if __name__ == "__main__":
 
     for label, sample in (("kambi_style", SAMPLE_KAMBI_STYLE), ("generic_nested", SAMPLE_GENERIC_NESTED)):
         print(f"\n=== Normalizing sample: {label} ===")
-        print(normalizer.normalize_to_json(sample, provider_hint=label))
+        print(normalizer.normalize_to_json(sample, provider_hint=label, field_mappings=per_call_mappings))
 
     # Resilient fallback pass: clear mappings and rely on lexicon matching only.
     normalizer.set_field_mappings({})

@@ -317,6 +317,9 @@ class SchemaExporter:
         streaming_endpoints_dict: Dict[str, Dict[str, Any]] = {}
         auxiliary_endpoints_dict: Dict[str, Dict[str, Any]] = {}
 
+        # Aggregate canonical-to-raw field mappings inferred for viable endpoints.
+        field_mappings: Dict[str, str] = {}
+
         for res in classified_results:
             sample_ev = getattr(res, "sample_event", None)
             if not sample_ev:
@@ -399,6 +402,23 @@ class SchemaExporter:
                 "sample_response": summarized_payload,
             }
             endpoint_key = f"{method}_{template_url}"
+
+            # Collect inferred field mappings (canonical key -> raw payload key).
+            res_mappings = getattr(res, "field_mappings", None)
+            if isinstance(res_mappings, dict):
+                for canonical_key, raw_key in res_mappings.items():
+                    if not isinstance(canonical_key, str) or not isinstance(raw_key, str):
+                        continue
+                    if not canonical_key or not raw_key:
+                        continue
+                    existing = field_mappings.get(canonical_key)
+                    if existing is not None and existing != raw_key:
+                        logging.warning(
+                            f"[SchemaExporter] Conflicting field mapping for '{canonical_key}': "
+                            f"keeping '{existing}', ignoring '{raw_key}'."
+                        )
+                        continue
+                    field_mappings[canonical_key] = raw_key
             if is_websocket:
                 streaming_endpoints_dict[endpoint_key] = endpoint_data
             elif is_auxiliary:
@@ -426,6 +446,7 @@ class SchemaExporter:
         schema_dict: Dict[str, Any] = {
             "target_domain": target_domain,
             "provider_family": provider_family,
+            "field_mappings": field_mappings,
             "discovered_at": datetime.datetime.utcnow()
                 .replace(tzinfo=datetime.timezone.utc)
                 .isoformat(),

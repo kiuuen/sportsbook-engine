@@ -726,7 +726,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
 
     ODDS_LIST_TERMS: Set[str] = {"odds", "prices", "odds_list", "oddslist", "odd_ids", "oddids"}
     MARKET_POINTER_TERMS: Set[str] = {"market_ids", "marketids", "markets"}
-    OUTCOME_POINTER_TERMS: Set[str] = {
+    ODD_POINTER_TERMS: Set[str] = {
         "odd_ids", "oddids", "odds", "outcome_ids", "outcomeids",
         "selection_ids", "selectionids", "selections", "runners",
     }
@@ -841,25 +841,57 @@ class RelationalEntitiesAdapter(ProviderAdapter):
     def _resolve_indexed_outcomes(
         self, node: Dict[str, Any], outcomes_index: Dict[str, CanonicalOutcome]
     ) -> List[CanonicalOutcome]:
-        """Resolve child outcomes by scanning the node for ID lists and looking them up."""
+        """Resolve child outcomes via pointer arrays/IDs, then nested rows.
+
+        Pointer keys are matched against ``ODD_POINTER_TERMS`` (covering
+        ``odd_ids``/``oddids``/``odds``/``selections`` and camelCase variants via
+        token matching). All references are normalized to stripped strings before
+        lookup so integer and string identifiers compare seamlessly. Nested
+        outcome containers are consulted only when no pointer resolved.
+        """
         resolved: List[CanonicalOutcome] = []
         seen_ids: Set[str] = set()
-        for term in tuple(self.OUTCOME_LIST_TERMS) + tuple(self.OUTCOME_ID_TERMS):
+
+        def _resolve_ref(raw_ref: Any) -> None:
+            ref_id = SafePayloadUtils.coerce_str(raw_ref)
+            if ref_id is None or ref_id in seen_ids:
+                return
+            outcome = outcomes_index.get(ref_id)
+            if outcome is not None:
+                seen_ids.add(ref_id)
+                resolved.append(outcome)
+
+        for term in self.ODD_POINTER_TERMS:
             for key, value in node.items():
-                if not isinstance(value, list):
-                    continue
                 if not SafePayloadUtils.key_matches(key, term):
                     continue
-                for item in value:
-                    ref_id = SafePayloadUtils.coerce_str(item)
-                    if ref_id is None or ref_id in seen_ids:
-                        continue
-                    outcome = outcomes_index.get(ref_id)
-                    if outcome is not None:
-                        seen_ids.add(ref_id)
-                        resolved.append(outcome)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            outcome = self._build_outcome(item)
+                            if outcome is None:
+                                continue
+                            dedupe_key = outcome.provider_outcome_id or (
+                                f"{outcome.label}|{outcome.odds_decimal}"
+                            )
+                            if dedupe_key in seen_ids:
+                                continue
+                            seen_ids.add(dedupe_key)
+                            resolved.append(outcome)
+                        else:
+                            _resolve_ref(item)
+                else:
+                    # Scalar pointer (e.g. ``"oddIds": 12345``).
+                    _resolve_ref(value)
             if resolved:
                 return resolved
+
+        if not resolved:
+            nested = self._find_container(node, "outcome_container", self.OUTCOME_LIST_TERMS) or []
+            for nested_node in nested:
+                outcome = self._build_outcome(nested_node)
+                if outcome is not None:
+                    resolved.append(outcome)
         return resolved
 
     def _build_market_entries(
@@ -1096,7 +1128,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 attached_ids: Set[str] = set()
 
                 # Top-down linking: ID lists on the event row referencing market ids.
-                for term in self.MARKET_LIST_TERMS:
+                for term in self.MARKET_POINTER_TERMS:
                     for key, value in event_node.items():
                         if not isinstance(value, list):
                             continue

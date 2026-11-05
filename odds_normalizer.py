@@ -1039,6 +1039,93 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 return resolved
         return resolved
 
+    def _stitch_events(
+        self, payload: Dict[str, Any], markets_index: Dict[str, CanonicalMarket]
+    ) -> List[CanonicalEvent]:
+        """Stitch canonical events to indexed markets via top-down and bottom-up links.
+
+        Top-down: ID lists on each event row whose keys match ``MARKET_LIST_TERMS``
+        are resolved against ``markets_index``. Bottom-up: any indexed market whose
+        event foreign key (keys matching ``EVENT_REF_TERMS``) equals the event's
+        ``event_id`` is attached. All identifier comparisons use stripped strings.
+        """
+        events: List[CanonicalEvent] = []
+        if not isinstance(payload, dict):
+            return events
+
+        try:
+            event_nodes = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS) or []
+        except Exception as err:
+            logger.warning(f"[{self.name}] Failed to locate events collection: {err}")
+            return events
+
+        # Pre-compute market_id -> event foreign key for bottom-up linking.
+        market_event_refs: Dict[str, str] = {}
+        try:
+            market_nodes = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS) or []
+            for node in market_nodes:
+                if not isinstance(node, dict):
+                    continue
+                market_id = SafePayloadUtils.coerce_str(
+                    self._mapped_lookup(node, "market_label", {"market_id", "id"})
+                )
+                event_ref = SafePayloadUtils.coerce_str(
+                    self._mapped_lookup(node, "event_id", self.EVENT_REF_TERMS)
+                )
+                if market_id is not None and event_ref is not None:
+                    market_event_refs[market_id] = event_ref
+        except Exception as err:
+            logger.warning(f"[{self.name}] Failed to index market event foreign keys: {err}")
+
+        for event_node in event_nodes:
+            if not isinstance(event_node, dict):
+                continue
+            try:
+                identity = self._extract_event_identity(event_node)
+                event = CanonicalEvent(
+                    event_id=identity["event_id"],
+                    home_team=identity["home_team"],
+                    away_team=identity["away_team"],
+                    start_time=identity["start_time"],
+                    raw_label=identity["raw_label"],
+                    source_provider=self.name,
+                    league=identity.get("league"),
+                    sport=identity.get("sport"),
+                )
+                attached_ids: Set[str] = set()
+
+                # Top-down linking: ID lists on the event row referencing market ids.
+                for term in self.MARKET_LIST_TERMS:
+                    for key, value in event_node.items():
+                        if not isinstance(value, list):
+                            continue
+                        if not SafePayloadUtils.key_matches(key, term):
+                            continue
+                        for item in value:
+                            ref_id = SafePayloadUtils.coerce_str(item)
+                            if ref_id is None or ref_id in attached_ids:
+                                continue
+                            market = markets_index.get(ref_id)
+                            if market is not None:
+                                attached_ids.add(ref_id)
+                                event.markets.append(market)
+
+                # Bottom-up linking: markets whose event FK matches this event id.
+                event_id = SafePayloadUtils.coerce_str(event.event_id)
+                if event_id is not None:
+                    for market_id, market in markets_index.items():
+                        if market_id in attached_ids:
+                            continue
+                        if market_event_refs.get(market_id) == event_id:
+                            attached_ids.add(market_id)
+                            event.markets.append(market)
+
+                events.append(event)
+            except Exception as err:
+                logger.warning(f"[{self.name}] Failed to stitch event node: {err}")
+                continue
+        return events
+
 
 class DeepTraversalAdapter(ProviderAdapter):
     """Fallback adapter that structurally infers events and outcomes from any nesting.

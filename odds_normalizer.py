@@ -775,6 +775,92 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 index[outcome_id] = outcome
         return index
 
+    def _build_outcomes_index(self, payload: Dict[str, Any]) -> Dict[str, CanonicalOutcome]:
+        """Index outcomes from the odds/prices collection keyed by stringified identifier."""
+        index: Dict[str, CanonicalOutcome] = {}
+        odds_nodes = self._find_container(payload, "odds_container", self.ODDS_LIST_TERMS)
+        if not odds_nodes:
+            odds_nodes = self._find_container(payload, "outcome_container", self.OUTCOME_LIST_TERMS)
+        for node in odds_nodes or []:
+            if not isinstance(node, dict):
+                continue
+            try:
+                outcome = self._build_outcome(node)
+            except Exception as err:
+                logger.warning(f"[{self.name}] Failed to build outcome from odds node: {err}")
+                continue
+            if outcome is None:
+                continue
+            outcome_id = outcome.provider_outcome_id or self.ctx.utils.coerce_str(
+                self._lookup_by_term(node, "id")
+            )
+            if outcome_id is None:
+                continue
+            index[outcome_id] = outcome
+        return index
+
+    def _build_markets_index(
+        self, payload: Dict[str, Any], outcomes_index: Dict[str, CanonicalOutcome]
+    ) -> Dict[str, CanonicalMarket]:
+        """Index markets keyed by stringified identifier, resolving outcomes via ``outcomes_index``."""
+        index: Dict[str, CanonicalMarket] = {}
+        market_nodes = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS) or []
+        for node in market_nodes:
+            if not isinstance(node, dict):
+                continue
+            try:
+                raw_label = (
+                    self.ctx.utils.coerce_str(
+                        self._mapped_lookup(node, "market_label", self.MARKET_LABEL_TERMS)
+                    )
+                    or "unknown_market"
+                )
+                canonical_type, confidence = self.ctx.classifier.classify(raw_label)
+                market = CanonicalMarket(
+                    canonical_type=canonical_type,
+                    raw_label=raw_label,
+                    market_id=self.ctx.utils.coerce_str(
+                        self._mapped_lookup(node, "market_label", {"market_id", "id"})
+                    ),
+                    classification_confidence=confidence,
+                )
+                for outcome in self._resolve_indexed_outcomes(node, outcomes_index):
+                    market.outcomes.append(outcome)
+            except Exception as err:
+                logger.warning(f"[{self.name}] Failed to build market from node: {err}")
+                continue
+            if not market.outcomes:
+                continue
+            market_key = market.market_id
+            if market_key is None:
+                continue
+            index[market_key] = market
+        return index
+
+    def _resolve_indexed_outcomes(
+        self, node: Dict[str, Any], outcomes_index: Dict[str, CanonicalOutcome]
+    ) -> List[CanonicalOutcome]:
+        """Resolve child outcomes by scanning the node for ID lists and looking them up."""
+        resolved: List[CanonicalOutcome] = []
+        seen_ids: Set[str] = set()
+        for term in tuple(self.OUTCOME_LIST_TERMS) + tuple(self.OUTCOME_ID_TERMS):
+            for key, value in node.items():
+                if not isinstance(value, list):
+                    continue
+                if not SafePayloadUtils.key_matches(key, term):
+                    continue
+                for item in value:
+                    ref_id = SafePayloadUtils.coerce_str(item)
+                    if ref_id is None or ref_id in seen_ids:
+                        continue
+                    outcome = outcomes_index.get(ref_id)
+                    if outcome is not None:
+                        seen_ids.add(ref_id)
+                        resolved.append(outcome)
+            if resolved:
+                return resolved
+        return resolved
+
     def _build_market_entries(
         self, payload: Dict[str, Any], odds_index: Dict[str, CanonicalOutcome]
     ) -> List[Dict[str, Any]]:

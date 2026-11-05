@@ -51,6 +51,33 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         has_outcomes = any(utils.has_key(payload, term) for term in self.outcome_list_terms)
         return has_markets or has_outcomes
 
+    def _resolve_primary_id(
+        self,
+        node: Dict[str, Any],
+        mapped_canonical_key: Optional[str],
+        candidate_keys: Tuple[str, ...],
+    ) -> Optional[str]:
+        """Resolve a primary identifier using exact-key equality only.
+
+        Compound/foreign keys (e.g. ``typeId``, ``sportMarketId``) can never
+        hijack resolution because token-subset matching is deliberately not
+        used here: the bare term ``"id"`` token-matches ``typeId``, and
+        ``"market_id"`` token-matches ``sportMarketId``. Only the learned
+        mapped key (exact) and the explicit candidate key names (exact) are
+        consulted, in that priority order.
+        """
+        if not isinstance(node, dict):
+            return None
+        mapped_key: Optional[str] = None
+        if mapped_canonical_key:
+            mapped_key = self.ctx.mappings.get(mapped_canonical_key)
+        for key in ((mapped_key,) if mapped_key else ()) + candidate_keys:
+            if key in node:
+                value = SafePayloadUtils.coerce_str(node[key])
+                if value is not None:
+                    return value
+        return None
+
     def normalize(self, payload: Any) -> List[CanonicalEvent]:
         """Reconstruct canonical events from relational sibling collections."""
         if not isinstance(payload, dict):
@@ -79,8 +106,10 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 continue
             if outcome is None:
                 continue
-            outcome_id = outcome.provider_outcome_id or self.ctx.utils.coerce_str(
-                self._lookup_by_term(node, "id")
+            outcome_id = self._resolve_primary_id(
+                node,
+                "outcome_id",
+                ("id", "outcome_id", "outcomeId", "selection_id", "selectionId", "runner_id", "runnerId"),
             )
             if outcome_id is None:
                 continue
@@ -115,8 +144,10 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 market = CanonicalMarket(
                     canonical_type=canonical_type,
                     raw_label=raw_label,
-                    market_id=self.ctx.utils.coerce_str(
-                        self._mapped_lookup(node, "market_label", {"market_id", "id"})
+                    market_id=self._resolve_primary_id(
+                        node,
+                        None,
+                        ("id", "market_id", "marketId"),
                     ),
                     classification_confidence=confidence,
                 )

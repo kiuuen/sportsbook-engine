@@ -58,13 +58,9 @@ class SessionManager:
                 captured_cookies: Dict[str, str] = {}
 
                 def on_network_event(event: NetworkEvent) -> None:
-                    nonlocal captured_headers, captured_cookies
+                    nonlocal captured_headers
                     if event.method == "GET" and event.url.startswith(f"https://{target_domain}"):
                         captured_headers.update(event.request_headers)
-                    if event.method == "GET" and event.url.startswith(f"https://{target_domain}"):
-                        # In a real implementation, you would parse the Set-Cookie headers here
-                        # For simplicity, we'll assume cookies are captured via other means
-                        pass
 
                 interceptor = CDPNetworkInterceptor(
                     cdp_ws_url=ws_url,
@@ -75,9 +71,13 @@ class SessionManager:
                 # Wait for the browser to fully load and capture network events
                 await asyncio.sleep(timeout)
 
-                # In a real implementation, you would extract cookies from the browser's storage
-                # For simplicity, we'll assume cookies are captured via the interceptor
-                # captured_cookies = { ... }
+                captured_cookies = await interceptor.get_cookies(
+                    urls=[f"https://{target_domain}"]
+                )
+                if not captured_cookies:
+                    logging.warning(
+                        f"[SessionManager] No session cookies found for {target_domain}."
+                    )
 
                 target_record = self.db_manager.get_target_by_domain(target_domain)
                 if not target_record:

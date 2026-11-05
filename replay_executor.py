@@ -2,24 +2,20 @@ import json
 import logging
 import pathlib
 import re
-import ssl
 import sqlite3
-import urllib.error
-import urllib.parse
-import urllib.request
 from typing import Any, Dict, List, Optional, Set, Union
 
+from curl_cffi.requests import Session
+from curl_cffi.requests.exceptions import HTTPError, RequestException
 from database_manager import DatabaseManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Unverified SSL context used to bypass [SSL: CERTIFICATE_VERIFY_FAILED]
-# errors on Windows where the system trust store is missing the site CAs.
-_UNVERIFIED_SSL_CONTEXT = ssl._create_unverified_context()
-
 # Maximum number of parent-endpoint chaining levels allowed when resolving
 # dynamic parameters, preventing circular/infinite recursion between endpoints.
 _MAX_CHAIN_DEPTH: int = 3
+
+_IMPERSONATION_TARGET: str = "chrome124"
 
 class ReplayExecutionError(RuntimeError):
     """Raised when a replay request fails for a cause that was already logged."""
@@ -84,6 +80,7 @@ class ReplayExecutor:
         self.session_cookies: Dict[str, str] = {}
         self.endpoints: Dict[str, Dict[str, Any]] = {}
         self.dependency_graph: Dict[str, Any] = {}
+        self.session: Optional[Session] = None
 
         # Case 1: an explicit target identifier.
         if isinstance(schema_source, int) and not isinstance(schema_source, bool):
@@ -141,6 +138,7 @@ class ReplayExecutor:
         self.endpoints = endpoints if isinstance(endpoints, dict) else {}
         dependency_graph = self.schema_data.get("dependency_graph", {})
         self.dependency_graph = dependency_graph if isinstance(dependency_graph, dict) else {}
+        self.reset_session()
 
     def _link_to_database_target(self) -> None:
         """Associate a file-based schema with its database target when possible."""
@@ -465,54 +463,67 @@ class ReplayExecutor:
         headers = self._build_request_headers()
 
         try:
-            req = urllib.request.Request(url=clean_url, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=10.0, context=_UNVERIFIED_SSL_CONTEXT) as response:
-                status_code = response.status
-                if status_code == 200:
-                    body_text = response.read().decode("utf-8", errors="replace")
-                    try:
-                        json.loads(body_text)
-                        # Successful probe – log to DB
-                        self._log_health(
-                            endpoint_key=target_key,
-                            status="SUCCESS",
-                            status_code=200,
-                            message="Session health probe succeeded (HTTP 200 JSON).",
-                            response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
-                        )
-                        logging.info(f"[ReplayExecutor] Session health probe succeeded (HTTP 200 JSON) on '{target_key}'.")
-                        return True
-                    except json.JSONDecodeError:
-                        # 200 but not JSON
-                        self._log_health(
-                            endpoint_key=target_key,
-                            status="FAILED",
-                            status_code=200,
-                            message="Health probe returned HTTP 200, but payload was not valid JSON.",
-                            response_preview="",
-                        )
-                        logging.warning("[ReplayExecutor] Health probe returned HTTP 200, but payload was not valid JSON.")
-                        return False
-                else:
-                    # Non-200 response
+            response = self.session.request(
+                method,
+                clean_url,
+                headers=headers,
+                timeout=10.0,
+                allow_redirects=True,
+            )
+            status_code = int(response.status_code)
+            if status_code == 200:
+                body_text = response.text
+                try:
+                    json.loads(body_text)
+                    self._log_health(
+                        endpoint_key=target_key,
+                        status="SUCCESS",
+                        status_code=200,
+                        message="Session health probe succeeded (HTTP 200 JSON).",
+                        response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
+                    )
+                    logging.info(f"[ReplayExecutor] Session health probe succeeded (HTTP 200 JSON) on '{target_key}'.")
+                    return True
+                except json.JSONDecodeError:
                     self._log_health(
                         endpoint_key=target_key,
                         status="FAILED",
-                        status_code=status_code,
-                        message=f"Health probe returned non-200 status: {status_code}",
+                        status_code=200,
+                        message="Health probe returned HTTP 200, but payload was not valid JSON.",
                         response_preview="",
                     )
-                    logging.warning(f"[ReplayExecutor] Health probe returned non-200 status: {status_code}")
+                    logging.warning("[ReplayExecutor] Health probe returned HTTP 200, but payload was not valid JSON.")
                     return False
-        except urllib.error.HTTPError as http_err:
+            else:
+                self._log_health(
+                    endpoint_key=target_key,
+                    status="FAILED",
+                    status_code=status_code,
+                    message=f"Health probe returned non-200 status: {status_code}",
+                    response_preview="",
+                )
+                logging.warning(f"[ReplayExecutor] Health probe returned non-200 status: {status_code}")
+                return False
+        except HTTPError as http_err:
+            status_code = int(getattr(getattr(http_err, "response", None), "status_code", -1) or -1)
             self._log_health(
                 endpoint_key=target_key,
                 status="FAILED",
-                status_code=http_err.code,
-                message=f"Session health check failed with HTTP status {http_err.code}: {http_err.reason}",
+                status_code=status_code,
+                message=f"Session health check failed with HTTP status {status_code}: {http_err}",
                 response_preview="",
             )
-            logging.warning(f"[ReplayExecutor] Session health check failed with HTTP status {http_err.code}.")
+            logging.warning(f"[ReplayExecutor] Session health check failed with HTTP status {status_code}.")
+            return False
+        except RequestException as req_err:
+            self._log_health(
+                endpoint_key=target_key,
+                status="FAILED",
+                status_code=-1,
+                message=f"Session health probe transport error: {req_err}",
+                response_preview="",
+            )
+            logging.warning(f"[ReplayExecutor] Session health probe transport error: {req_err}")
             return False
         except Exception as err:
             self._log_health(
@@ -544,59 +555,69 @@ class ReplayExecutor:
         hydrated_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
 
-        req = urllib.request.Request(url=hydrated_url, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=12.0, context=_UNVERIFIED_SSL_CONTEXT) as response:
-                status_code = response.status
-                body_bytes = response.read()
-                body_text = body_bytes.decode("utf-8", errors="replace")
+            response = self.session.request(
+                method,
+                hydrated_url,
+                headers=headers,
+                timeout=12.0,
+                allow_redirects=True,
+            )
+            status_code = int(response.status_code)
+            body_text = response.text
 
-                if status_code != 200:
-                    # Log failure before raising
-                    self._log_health(
-                        endpoint_key=endpoint_key,
-                        status="FAILED",
-                        status_code=status_code,
-                        message=f"HTTP request failed with status code {status_code}",
-                        response_preview="",
-                    )
-                    raise RuntimeError(f"HTTP request failed with status code {status_code}")
-
-                try:
-                    payload = json.loads(body_text)
-                except json.JSONDecodeError as jde:
-                    # Log non-JSON response failure
-                    self._log_health(
-                        endpoint_key=endpoint_key,
-                        status="FAILED",
-                        status_code=status_code,
-                        message=f"Response payload was not valid JSON: {jde}",
-                        response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
-                    )
-                    raise RuntimeError("Response payload was not valid JSON") from jde
-
-                # Success – log and return
+            if status_code != 200:
                 self._log_health(
                     endpoint_key=endpoint_key,
-                    status="SUCCESS",
-                    status_code=200,
-                    message="Replay execution succeeded (HTTP 200 JSON).",
-                    response_preview=self.clamp_preview(payload, max_lines=5, max_chars=500),
+                    status="FAILED",
+                    status_code=status_code,
+                    message=f"HTTP request failed with status code {status_code}",
+                    response_preview="",
                 )
-                return payload
+                raise ReplayExecutionError(f"HTTP request failed with status code {status_code}")
 
-        except urllib.error.HTTPError as http_err:
+            try:
+                payload = json.loads(body_text)
+            except json.JSONDecodeError as jde:
+                self._log_health(
+                    endpoint_key=endpoint_key,
+                    status="FAILED",
+                    status_code=status_code,
+                    message=f"Response payload was not valid JSON: {jde}",
+                    response_preview=self.clamp_preview(body_text, max_lines=5, max_chars=500),
+                )
+                raise RuntimeError("Response payload was not valid JSON") from jde
+
+            self._log_health(
+                endpoint_key=endpoint_key,
+                status="SUCCESS",
+                status_code=200,
+                message="Replay execution succeeded (HTTP 200 JSON).",
+                response_preview=self.clamp_preview(payload, max_lines=5, max_chars=500),
+            )
+            return payload
+
+        except ReplayExecutionError:
+            raise
+        except HTTPError as http_err:
+            status_code = int(getattr(getattr(http_err, "response", None), "status_code", -1) or -1)
             self._log_health(
                 endpoint_key=endpoint_key,
                 status="FAILED",
-                status_code=http_err.code,
-                message=f"HTTP error during execution: {http_err.code} {http_err.reason}",
+                status_code=status_code,
+                message=f"HTTP error during execution: {http_err}",
                 response_preview="",
             )
-            raise ReplayExecutionError(
-                f"HTTP request failed with status code {http_err.code}: {http_err.reason}"
-            ) from http_err
-
+            raise ReplayExecutionError(f"HTTP request failed with status code {status_code}: {http_err}") from http_err
+        except RequestException as req_err:
+            self._log_health(
+                endpoint_key=endpoint_key,
+                status="FAILED",
+                status_code=-1,
+                message=f"Transport error during execution: {req_err}",
+                response_preview="",
+            )
+            raise RuntimeError(f"Transport error for endpoint '{endpoint_key}': {req_err}") from req_err
         except Exception as err:
             self._log_health(
                 endpoint_key=endpoint_key,

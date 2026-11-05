@@ -736,24 +736,25 @@ class RelationalEntitiesAdapter(ProviderAdapter):
     }
 
     def can_handle(self, payload: Any) -> bool:
-        """Claim payloads with a sibling event collection plus markets or odds."""
+        """Claim payloads with root-level sibling event and market/odds collections."""
         if not isinstance(payload, dict):
             return False
-        events = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS)
-        if not events:
+        utils = self.ctx.utils
+        has_events = any(utils.has_key(payload, term) for term in self.EVENT_LIST_TERMS)
+        if not has_events:
             return False
-        markets = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS)
-        odds = self._find_container(payload, "odds_container", self.ODDS_LIST_TERMS)
-        return bool(markets or odds)
+        has_markets = any(utils.has_key(payload, term) for term in self.MARKET_LIST_TERMS)
+        has_outcomes = any(utils.has_key(payload, term) for term in self.OUTCOME_LIST_TERMS)
+        return has_markets or has_outcomes
 
     def normalize(self, payload: Any) -> List[CanonicalEvent]:
         """Reconstruct canonical events from relational sibling collections."""
         if not isinstance(payload, dict):
             return []
         try:
-            odds_index = self._build_outcome_index(payload)
-            market_entries = self._build_market_entries(payload, odds_index)
-            return self._build_events(payload, odds_index, market_entries)
+            outcomes_index = self._build_outcomes_index(payload)
+            markets_index = self._build_markets_index(payload, outcomes_index)
+            return self._stitch_events(payload, markets_index)
         except Exception as err:
             logger.warning(f"[{self.name}] Failed to normalize relational payload: {err}")
             return []

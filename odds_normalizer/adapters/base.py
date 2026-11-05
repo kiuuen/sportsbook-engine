@@ -36,6 +36,9 @@ class ProviderAdapter:
     resolved dynamically per instance: baseline seeds are merged with matching
     positive categories from the injected :class:`LexiconManager`, and learned
     target mappings (``FieldMappingResolver``) always take lookup priority.
+    Lexicon enrichment is domain-gated per field: a lexicon term is only merged
+    into a field's vocabulary when its tokens overlap that field's semantic
+    domain, so identity vocabularies (home/away/league/start) never collide.
     """
 
     name: str = "base_adapter"
@@ -65,29 +68,33 @@ class ProviderAdapter:
 
     _LEXICON_CATEGORIES: Tuple[str, ...] = ("sports_event_metadata", "betting_markets_and_odds")
 
-    # Routes each working vocabulary to the lexicon category it augments.
-    _LEXICON_CATEGORY_BY_FIELD: Dict[str, str] = {
-        "event_id_terms": "sports_event_metadata",
-        "generic_id_terms": "sports_event_metadata",
-        "home_terms": "sports_event_metadata",
-        "away_terms": "sports_event_metadata",
-        "start_terms": "sports_event_metadata",
-        "event_label_terms": "sports_event_metadata",
-        "league_terms": "sports_event_metadata",
-        "sport_terms": "sports_event_metadata",
-        "event_list_terms": "sports_event_metadata",
-        "market_label_terms": "betting_markets_and_odds",
-        "outcome_label_terms": "betting_markets_and_odds",
-        "odds_terms": "betting_markets_and_odds",
-        "line_terms": "betting_markets_and_odds",
-        "outcome_id_terms": "betting_markets_and_odds",
-        "market_list_terms": "betting_markets_and_odds",
-        "outcome_list_terms": "betting_markets_and_odds",
+    # Domain tokens gate lexicon enrichment per field: a lexicon term joins a
+    # field's working vocabulary only when one of its tokens overlaps the
+    # field's semantic domain. Fields with an empty domain set are never
+    # enriched, keeping vocabularies mutually distinct.
+    _FIELD_DOMAIN_TOKENS: Dict[str, Set[str]] = {
+        "event_id_terms": {"event", "match", "fixture", "game"},
+        "generic_id_terms": set(),  # structural generic key; never enriched
+        "home_terms": {"home", "local"},
+        "away_terms": {"away", "visit", "visitor", "guest"},
+        "start_terms": {"time", "date", "kickoff", "commence", "schedule", "start"},
+        "event_label_terms": {"event", "match", "title", "label"},
+        "market_label_terms": {"market", "bet", "offer", "wager"},
+        "outcome_label_terms": {"outcome", "selection", "runner", "pick"},
+        "odds_terms": {"odds", "odd", "price", "quote"},
+        "line_terms": {"line", "spread", "handicap"},
+        "outcome_id_terms": {"outcome", "selection", "runner"},
+        "market_list_terms": set(),  # structural container; never enriched
+        "outcome_list_terms": set(),  # structural container; never enriched
+        "event_list_terms": set(),  # structural container; never enriched
+        "league_terms": {"league", "competition", "tournament", "championship", "division"},
+        "sport_terms": {"sport", "discipline"},
     }
 
     def __init__(self, ctx: NormalizationContext) -> None:
         self.ctx = ctx
         self._lexicon_terms_by_category: Dict[str, Set[str]] = self._load_lexicon_terms()
+        self._ambiguous_lexicon_terms: Set[str] = self._compute_ambiguous_lexicon_terms()
         self.event_id_terms: Set[str] = self._build_working_terms("event_id_terms", self._DEFAULT_EVENT_ID_TERMS)
         self.generic_id_terms: Set[str] = self._build_working_terms("generic_id_terms", self._DEFAULT_GENERIC_ID_TERMS)
         self.home_terms: Set[str] = self._build_working_terms("home_terms", self._DEFAULT_HOME_TERMS)
@@ -142,13 +149,59 @@ class ProviderAdapter:
                 grouped[category] = cleaned
         return grouped
 
+    def _compute_ambiguous_lexicon_terms(self) -> Set[str]:
+        """Identify lexicon terms whose tokens match more than one field domain.
+
+        Such terms are semantically ambiguous (e.g. a term containing both a
+        "home" and an "away" signal); they are excluded from enrichment
+        entirely so mutually distinct fields can never share an identity term.
+        """
+        ambiguous: Set[str] = set()
+        for terms in self._lexicon_terms_by_category.values():
+            for term in terms:
+                matched_fields = [
+                    field_name
+                    for field_name, domain in self._FIELD_DOMAIN_TOKENS.items()
+                    if self._term_matches_domain(term, domain)
+                ]
+                if len(matched_fields) > 1:
+                    ambiguous.add(term)
+        return ambiguous
+
+    @staticmethod
+    def _term_matches_domain(term: str, domain_tokens: Set[str]) -> bool:
+        """True when any token of ``term`` (plural-tolerant) hits ``domain_tokens``."""
+        if not domain_tokens:
+            return False
+        for token in SafePayloadUtils.tokenize_key(term):
+            variants = {token}
+            if len(token) > 3 and token.endswith("s"):
+                variants.add(token[:-1])
+            if len(token) > 4 and token.endswith("es"):
+                variants.add(token[:-2])
+            if variants & domain_tokens:
+                return True
+        return False
+
     def _build_working_terms(self, field_name: str, seeds: Set[str]) -> Set[str]:
-        """Merge baseline seeds with lexicon terms from the field's category."""
-        category = self._LEXICON_CATEGORY_BY_FIELD.get(field_name)
-        lexicon_terms = (
-            self._lexicon_terms_by_category.get(category, set()) if category else set()
-        )
-        return set(seeds) | lexicon_terms
+        """Merge the field's specific seeds with domain-gated lexicon terms.
+
+        A lexicon term joins the working vocabulary only when one of its tokens
+        overlaps the field's domain tokens (``_FIELD_DOMAIN_TOKENS``) and the
+        term is unambiguous across fields. Fields never absorb unrelated
+        category words, so per-field vocabularies stay mutually distinct.
+        """
+        working: Set[str] = set(seeds)
+        domain_tokens = self._FIELD_DOMAIN_TOKENS.get(field_name, set())
+        if not domain_tokens:
+            return working
+        for terms in self._lexicon_terms_by_category.values():
+            for term in terms:
+                if term in working or term in self._ambiguous_lexicon_terms:
+                    continue
+                if self._term_matches_domain(term, domain_tokens):
+                    working.add(term)
+        return working
 
     def can_handle(self, payload: Any) -> bool:
         """Return True when this adapter recognizes the payload layout."""

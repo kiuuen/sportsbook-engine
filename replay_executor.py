@@ -140,6 +140,28 @@ class ReplayExecutor:
         self.dependency_graph = dependency_graph if isinstance(dependency_graph, dict) else {}
         self.reset_session()
 
+    def _create_session(self) -> Session:
+        """Build a curl_cffi session with Chrome impersonation and stored cookies."""
+        session = Session(impersonate=_IMPERSONATION_TARGET, verify=False)
+        for name, value in self.session_cookies.items():
+            if name is None or value is None:
+                continue
+            try:
+                session.cookies.set(str(name), str(value))
+            except Exception as err:
+                logging.warning(f"[ReplayExecutor] Failed to set cookie '{name}': {err}")
+        return session
+
+    def reset_session(self) -> None:
+        """Close and rebuild the HTTP session (call after credentials/schema reload)."""
+        old_session = getattr(self, "session", None)
+        if old_session is not None:
+            try:
+                old_session.close()
+            except Exception as err:
+                logging.warning(f"[ReplayExecutor] Failed to close old session: {err}")
+        self.session = self._create_session()
+
     def _link_to_database_target(self) -> None:
         """Associate a file-based schema with its database target when possible."""
         if self.db_manager is None:
@@ -452,6 +474,8 @@ class ReplayExecutor:
 
         clean_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
+        if self.session is None:
+            self.reset_session()
 
         try:
             response = self.session.request(
@@ -545,6 +569,8 @@ class ReplayExecutor:
         method = endpoint_info.get("method", "GET")
         hydrated_url = self.hydrate_url(template_url, resolved_params)
         headers = self._build_request_headers()
+        if self.session is None:
+            self.reset_session()
 
         try:
             response = self.session.request(

@@ -564,6 +564,7 @@ class HeuristicClassifier:
         final_score = max(0.0, min(100.0, raw_score))
 
         produced_params = self._extract_produced_identifiers(keys_found)
+        field_mappings = self._infer_field_mappings(keys_found, contextual_numerics)
         role, volatility = self._deduce_role_and_volatility(
             url_template=url_template,
             total_odds_count=total_odds_count,

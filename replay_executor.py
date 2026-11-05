@@ -320,15 +320,6 @@ class ReplayExecutor:
             origin = f"https://{domain}"
             headers.setdefault("referer", f"{origin}/")
             headers.setdefault("origin", origin)
-
-        if self.session_cookies:
-            cookie_pairs = [
-                f"{key}={value}"
-                for key, value in self.session_cookies.items()
-                if key is not None and value is not None
-            ]
-            if cookie_pairs:
-                headers["cookie"] = "; ".join(cookie_pairs)
         return headers
 
     def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:

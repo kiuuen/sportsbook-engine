@@ -16,7 +16,6 @@ from odds_normalizer.utils import SafePayloadUtils
 
 logger = logging.getLogger("odds_normalizer")
 
-
 class RelationalEntitiesAdapter(ProviderAdapter):
     """Adapter for relational/columnar payloads with sibling entity collections.
 
@@ -29,15 +28,25 @@ class RelationalEntitiesAdapter(ProviderAdapter):
     priority = 15
 
     ODDS_LIST_TERMS: Set[str] = {"odds", "prices", "odds_list", "oddslist", "odd_ids", "oddids"}
-    MARKET_POINTER_TERMS: Tuple[str, ...] = ("market_ids", "marketids", "markets")
-    ODD_POINTER_TERMS: Tuple[str, ...] = (
-        "odd_ids", "oddids", "odds", "outcome_ids", "outcomeids",
-        "selection_ids", "selectionids", "selections", "runners",
+
+    # Exact key names only — token-subset matching is forbidden for identifier
+    # resolution because bare terms like "id" token-match secondary keys
+    # such as "typeId" or "sportMarketId".
+    ODD_POINTER_KEYS: Tuple[str, ...] = (
+        "oddIds", "odd_ids", "oddids", "odds",
+        "outcomeIds", "outcome_ids", "outcomeids",
+        "selectionIds", "selection_ids", "selectionids",
+        "selections", "runners", "runnerIds", "runner_ids",
     )
-    EVENT_REF_TERMS: Set[str] = {
-        "event_id", "eventid", "match_id", "matchid", "fixture_id", "fixtureid",
-        "parent_id", "parentid", "parent_event_id",
-    }
+    MARKET_POINTER_KEYS: Tuple[str, ...] = (
+        "marketIds", "market_ids", "marketids", "marketId", "market_id", "markets",
+    )
+    EVENT_REF_KEYS: Tuple[str, ...] = (
+        "eventId", "event_id", "eventid",
+        "matchId", "match_id", "matchid",
+        "fixtureId", "fixture_id", "fixtureid",
+        "parentEventId", "parent_event_id", "parentId", "parent_id", "parentid",
+    )
 
     def can_handle(self, payload: Any) -> bool:
         """Claim payloads with root-level sibling event and market/odds collections."""
@@ -51,27 +60,16 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         has_outcomes = any(utils.has_key(payload, term) for term in self.outcome_list_terms)
         return has_markets or has_outcomes
 
-    def _resolve_primary_id(
-        self,
-        node: Dict[str, Any],
-        mapped_canonical_key: Optional[str],
-        candidate_keys: Tuple[str, ...],
-    ) -> Optional[str]:
-        """Resolve a primary identifier using exact-key equality only.
+    @staticmethod
+    def _exact_str_id(node: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[str]:
+        """Return the first exact-key identifier coerced to a stripped string.
 
-        Compound/foreign keys (e.g. ``typeId``, ``sportMarketId``) can never
-        hijack resolution because token-subset matching is deliberately not
-        used here: the bare term ``"id"`` token-matches ``typeId``, and
-        ``"market_id"`` token-matches ``sportMarketId``. Only the learned
-        mapped key (exact) and the explicit candidate key names (exact) are
-        consulted, in that priority order.
+        Only literal key equality is used; no token matching and no learned
+        mapping tier, so secondary keys can never hijack primary-key resolution.
         """
         if not isinstance(node, dict):
             return None
-        mapped_key: Optional[str] = None
-        if mapped_canonical_key:
-            mapped_key = self.ctx.mappings.get(mapped_canonical_key)
-        for key in ((mapped_key,) if mapped_key else ()) + candidate_keys:
+        for key in keys:
             if key in node:
                 value = SafePayloadUtils.coerce_str(node[key])
                 if value is not None:
@@ -93,9 +91,9 @@ class RelationalEntitiesAdapter(ProviderAdapter):
     def _build_outcomes_index(self, payload: Dict[str, Any]) -> Dict[str, CanonicalOutcome]:
         """Index outcomes from the odds/prices collection keyed by stringified identifier."""
         index: Dict[str, CanonicalOutcome] = {}
-        odds_nodes = self._find_container(payload, "outcome_container", self.ODDS_LIST_TERMS)
+        odds_nodes = SafePayloadUtils.find_first_list(payload, self.ODDS_LIST_TERMS)
         if not odds_nodes:
-            odds_nodes = self._find_container(payload, "outcome_container", self.outcome_list_terms)
+            odds_nodes = SafePayloadUtils.find_first_list(payload, self.outcome_list_terms)
         for node in odds_nodes or []:
             if not isinstance(node, dict):
                 continue
@@ -106,11 +104,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 continue
             if outcome is None:
                 continue
-            outcome_id = self._resolve_primary_id(
-                node,
-                "outcome_id",
-                ("id", "outcome_id", "outcomeId", "selection_id", "selectionId", "runner_id", "runnerId"),
-            )
+            outcome_id = self._exact_str_id(node, ("id",))
             if outcome_id is None:
                 continue
             index[outcome_id] = outcome
@@ -129,6 +123,8 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         index: Dict[str, CanonicalMarket] = {}
         event_refs: Dict[str, str] = {}
         market_nodes = self._find_container(payload, "market_container", self.market_list_terms) or []
+        if not market_nodes:
+            market_nodes = SafePayloadUtils.find_first_list(payload, self.market_list_terms) or []
         synthetic_counter = 0
         for node in market_nodes:
             if not isinstance(node, dict):
@@ -144,11 +140,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 market = CanonicalMarket(
                     canonical_type=canonical_type,
                     raw_label=raw_label,
-                    market_id=self._resolve_primary_id(
-                        node,
-                        None,
-                        ("id", "market_id", "marketId"),
-                    ),
+                    market_id=self._exact_str_id(node, ("id",)),
                     classification_confidence=confidence,
                 )
                 for outcome in self._resolve_indexed_outcomes(node, outcomes_index):
@@ -164,9 +156,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 synthetic_counter += 1
                 market_key = f"anon_market_{synthetic_counter}"
             index[market_key] = market
-            event_ref = self.ctx.utils.coerce_str(
-                self._mapped_lookup(node, "event_id", self.EVENT_REF_TERMS)
-            )
+            event_ref = self._exact_str_id(node, self.EVENT_REF_KEYS)
             if event_ref is not None:
                 event_refs[market_key] = event_ref
         return index, event_refs
@@ -194,28 +184,29 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 seen_ids.add(ref_id)
                 resolved.append(outcome)
 
-        for term in self.ODD_POINTER_TERMS:
-            for key, value in node.items():
-                if not SafePayloadUtils.key_matches(key, term):
-                    continue
-                if isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            outcome = self._build_outcome(item)
-                            if outcome is None:
-                                continue
-                            dedupe_key = outcome.provider_outcome_id or (
-                                f"{outcome.label}|{outcome.odds_decimal}"
-                            )
-                            if dedupe_key in seen_ids:
-                                continue
-                            seen_ids.add(dedupe_key)
-                            resolved.append(outcome)
-                        else:
-                            _resolve_ref(item)
-                else:
-                    # Scalar pointer (e.g. ``"oddIds": 12345``).
-                    _resolve_ref(value)
+        for key in self.ODD_POINTER_KEYS:
+            if key not in node:
+                continue
+            value = node[key]
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        outcome = self._build_outcome(item)
+                        if outcome is None:
+                            continue
+                        dedupe_key = (
+                            SafePayloadUtils.coerce_str(item.get("id"))
+                            or outcome.provider_outcome_id
+                            or f"{outcome.label}|{outcome.odds_decimal}"
+                        )
+                        if dedupe_key in seen_ids:
+                            continue
+                        seen_ids.add(dedupe_key)
+                        resolved.append(outcome)
+                    else:
+                        _resolve_ref(item)
+            else:
+                _resolve_ref(value)
             if resolved:
                 return resolved
 
@@ -268,21 +259,21 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 attached_ids: Set[str] = set()
 
                 # Top-down linking: market ID pointers on the event row.
-                for term in self.MARKET_POINTER_TERMS:
-                    for key, value in event_node.items():
-                        if not SafePayloadUtils.key_matches(key, term):
+                for key in self.MARKET_POINTER_KEYS:
+                    if key not in event_node:
+                        continue
+                    value = event_node[key]
+                    candidates = value if isinstance(value, list) else [value]
+                    for item in candidates:
+                        if isinstance(item, (dict, list)):
                             continue
-                        candidates = value if isinstance(value, list) else [value]
-                        for item in candidates:
-                            if isinstance(item, (dict, list)):
-                                continue
-                            ref_id = SafePayloadUtils.coerce_str(item)
-                            if ref_id is None or ref_id in attached_ids:
-                                continue
-                            market = markets_index.get(ref_id)
-                            if market is not None:
-                                attached_ids.add(ref_id)
-                                event.markets.append(market)
+                        ref_id = SafePayloadUtils.coerce_str(item)
+                        if ref_id is None or ref_id in attached_ids:
+                            continue
+                        market = markets_index.get(ref_id)
+                        if market is not None:
+                            attached_ids.add(ref_id)
+                            event.markets.append(market)
 
                 # Bottom-up linking: markets whose event FK matches this event id.
                 event_id = SafePayloadUtils.coerce_str(event.event_id)

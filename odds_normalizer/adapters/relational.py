@@ -44,11 +44,11 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         if not isinstance(payload, dict):
             return False
         utils = self.ctx.utils
-        has_events = any(utils.has_key(payload, term) for term in self.EVENT_LIST_TERMS)
+        has_events = any(utils.has_key(payload, term) for term in self.event_list_terms)
         if not has_events:
             return False
-        has_markets = any(utils.has_key(payload, term) for term in self.MARKET_LIST_TERMS)
-        has_outcomes = any(utils.has_key(payload, term) for term in self.OUTCOME_LIST_TERMS)
+        has_markets = any(utils.has_key(payload, term) for term in self.market_list_terms)
+        has_outcomes = any(utils.has_key(payload, term) for term in self.outcome_list_terms)
         return has_markets or has_outcomes
 
     def normalize(self, payload: Any) -> List[CanonicalEvent]:
@@ -68,7 +68,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         index: Dict[str, CanonicalOutcome] = {}
         odds_nodes = self._find_container(payload, "outcome_container", self.ODDS_LIST_TERMS)
         if not odds_nodes:
-            odds_nodes = self._find_container(payload, "outcome_container", self.OUTCOME_LIST_TERMS)
+            odds_nodes = self._find_container(payload, "outcome_container", self.outcome_list_terms)
         for node in odds_nodes or []:
             if not isinstance(node, dict):
                 continue
@@ -99,7 +99,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
         """
         index: Dict[str, CanonicalMarket] = {}
         event_refs: Dict[str, str] = {}
-        market_nodes = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS) or []
+        market_nodes = self._find_container(payload, "market_container", self.market_list_terms) or []
         synthetic_counter = 0
         for node in market_nodes:
             if not isinstance(node, dict):
@@ -107,7 +107,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
             try:
                 raw_label = (
                     self.ctx.utils.coerce_str(
-                        self._mapped_lookup(node, "market_label", self.MARKET_LABEL_TERMS)
+                        self._mapped_lookup(node, "market_label", self.market_label_terms)
                     )
                     or "unknown_market"
                 )
@@ -189,7 +189,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
                 return resolved
 
         if not resolved:
-            nested = self._find_container(node, "outcome_container", self.OUTCOME_LIST_TERMS) or []
+            nested = self._find_container(node, "outcome_container", self.outcome_list_terms) or []
             for nested_node in nested:
                 outcome = self._build_outcome(nested_node)
                 if outcome is not None:
@@ -214,7 +214,7 @@ class RelationalEntitiesAdapter(ProviderAdapter):
             return events
 
         try:
-            event_nodes = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS) or []
+            event_nodes = self._find_container(payload, "match_container", self.event_list_terms) or []
         except Exception as err:
             logger.warning(f"[{self.name}] Failed to locate events collection: {err}")
             return events

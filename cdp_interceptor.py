@@ -88,6 +88,41 @@ class CDPNetworkInterceptor:
     def get_captured_events(self) -> List[NetworkEvent]:
         return list(self.captured_events)
 
+    async def get_cookies(self, urls: Optional[List[str]] = None) -> Dict[str, str]:
+        """Query active browser cookies via the CDP ``Network.getCookies`` command.
+
+        Args:
+            urls: Optional list of resource URLs to scope the cookie query to
+                specific domains. When ``None`` or empty, cookies for the
+                entire browser context are returned.
+
+        Returns:
+            A flat mapping of cookie names to their values. Returns an empty
+            dictionary if the WebSocket is not connected or the CDP command
+            fails.
+        """
+        if not self._ws or not self._is_listening:
+            logging.warning("[CDP] Cannot get cookies: WebSocket is not connected.")
+            return {}
+
+        params: Dict[str, Any] = {}
+        if urls:
+            params["urls"] = list(urls)
+
+        try:
+            result = await self._send_command("Network.getCookies", params or None)
+        except Exception as err:
+            logging.warning(f"[CDP] Failed to retrieve cookies via CDP: {err}")
+            return {}
+
+        cookies: Dict[str, str] = {}
+        for cookie in result.get("cookies", []):
+            name = cookie.get("name")
+            if not name:
+                continue
+            cookies[name] = cookie.get("value", "")
+        return cookies
+
     async def _send_command(
         self, method: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:

@@ -482,18 +482,6 @@ class ProviderAdapter:
             if direct is not None:
                 return direct
         return self.ctx.utils.find_first(node, {term})
-        utils = self.ctx.utils
-        specific_id = utils.coerce_str(self._mapped_lookup(node, "event_id", self.EVENT_ID_TERMS))
-        generic_id = utils.coerce_str(utils.find_first(node, self.GENERIC_ID_TERMS))
-        return {
-            "event_id": specific_id or generic_id,
-            "home_team": utils.coerce_str(self._mapped_lookup(node, "home_team", self.HOME_TERMS)),
-            "away_team": utils.coerce_str(self._mapped_lookup(node, "away_team", self.AWAY_TERMS)),
-            "start_time": utils.coerce_str(self._mapped_lookup(node, "start_time", self.START_TERMS)),
-            "league": utils.coerce_str(self._mapped_lookup(node, "league", self.LEAGUE_TERMS)),
-            "sport": utils.coerce_str(self._mapped_lookup(node, "sport", self.SPORT_TERMS)),
-            "raw_label": utils.coerce_str(self._mapped_lookup(node, "event_label", self.EVENT_LABEL_TERMS)),
-        }
 
     def _looks_like_event(self, node: Any) -> bool:
         if not isinstance(node, dict):
@@ -725,6 +713,246 @@ class GenericEventsAdapter(ProviderAdapter):
                 canonical_events.append(event)
         return canonical_events
 
+class RelationalEntitiesAdapter(ProviderAdapter):
+    """Adapter for relational/columnar payloads with sibling entity collections.
+
+    Targets layouts such as ``{"events": [...], "markets": [...], "odds": [...]}``
+    where events, markets, and odds/price rows live side by side at the root and
+    reference each other through identifier pointers instead of nesting.
+    """
+
+    name = "relational_entities"
+    priority = 15
+
+    ODDS_LIST_TERMS: Set[str] = {"odds", "prices", "odds_list", "oddslist", "odd_ids", "oddids"}
+    MARKET_POINTER_TERMS: Set[str] = {"market_ids", "marketids", "markets"}
+    OUTCOME_POINTER_TERMS: Set[str] = {
+        "odd_ids", "oddids", "odds", "outcome_ids", "outcomeids",
+        "selection_ids", "selectionids", "selections", "runners",
+    }
+    EVENT_REF_TERMS: Set[str] = {
+        "event_id", "eventid", "match_id", "matchid", "fixture_id", "fixtureid",
+        "parent_id", "parentid", "parent_event_id",
+    }
+
+    def can_handle(self, payload: Any) -> bool:
+        """Claim payloads with a sibling event collection plus markets or odds."""
+        if not isinstance(payload, dict):
+            return False
+        events = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS)
+        if not events:
+            return False
+        markets = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS)
+        odds = self._find_container(payload, "odds_container", self.ODDS_LIST_TERMS)
+        return bool(markets or odds)
+
+    def normalize(self, payload: Any) -> List[CanonicalEvent]:
+        """Reconstruct canonical events from relational sibling collections."""
+        if not isinstance(payload, dict):
+            return []
+        try:
+            odds_index = self._build_outcome_index(payload)
+            market_entries = self._build_market_entries(payload, odds_index)
+            return self._build_events(payload, odds_index, market_entries)
+        except Exception as err:
+            logger.warning(f"[{self.name}] Failed to normalize relational payload: {err}")
+            return []
+
+    def _build_outcome_index(self, payload: Dict[str, Any]) -> Dict[str, CanonicalOutcome]:
+        """Index outcomes from the odds/price collection keyed by their identifier."""
+        index: Dict[str, CanonicalOutcome] = {}
+        odds_nodes = self._find_container(payload, "odds_container", self.ODDS_LIST_TERMS) or []
+        for node in odds_nodes:
+            if not isinstance(node, dict):
+                continue
+            outcome = self._build_outcome(node)
+            if outcome is None:
+                continue
+            outcome_id = self.ctx.utils.coerce_str(
+                self._mapped_lookup(node, "outcome_id", self.OUTCOME_ID_TERMS)
+            )
+            if outcome_id is not None:
+                index[outcome_id] = outcome
+        return index
+
+    def _build_market_entries(
+        self, payload: Dict[str, Any], odds_index: Dict[str, CanonicalOutcome]
+    ) -> List[Dict[str, Any]]:
+        """Parse market rows into canonical markets plus their event references."""
+        entries: List[Dict[str, Any]] = []
+        market_nodes = self._find_container(payload, "market_container", self.MARKET_LIST_TERMS) or []
+        for node in market_nodes:
+            if not isinstance(node, dict):
+                continue
+            market = self._build_relational_market(node, odds_index)
+            if market is None:
+                continue
+            event_ref = self.ctx.utils.coerce_str(
+                self._mapped_lookup(node, "event_id", self.EVENT_REF_TERMS)
+            )
+            entries.append({"market": market, "event_ref": event_ref})
+        return entries
+
+    def _build_relational_market(
+        self, node: Dict[str, Any], odds_index: Dict[str, CanonicalOutcome]
+    ) -> Optional[CanonicalMarket]:
+        """Build one canonical market, resolving outcomes via the odds index."""
+        utils = self.ctx.utils
+        raw_label = (
+            utils.coerce_str(self._mapped_lookup(node, "market_label", self.MARKET_LABEL_TERMS))
+            or "unknown_market"
+        )
+        canonical_type, confidence = self.ctx.classifier.classify(raw_label)
+        market = CanonicalMarket(
+            canonical_type=canonical_type,
+            raw_label=raw_label,
+            market_id=utils.coerce_str(self._mapped_lookup(node, "market_label", {"market_id", "id"})),
+            classification_confidence=confidence,
+        )
+        seen_keys: Set[str] = set()
+        for outcome in self._resolve_pointer_outcomes(node, odds_index):
+            dedupe_key = outcome.provider_outcome_id or f"{outcome.label}|{outcome.odds_decimal}"
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            market.outcomes.append(outcome)
+        return market if market.outcomes else None
+
+    def _resolve_pointer_outcomes(
+        self, node: Dict[str, Any], odds_index: Dict[str, CanonicalOutcome]
+    ) -> List[CanonicalOutcome]:
+        """Resolve child outcomes from pointer arrays, falling back to nested rows."""
+        resolved: List[CanonicalOutcome] = []
+        for term in self.OUTCOME_POINTER_TERMS:
+            pointer: Any = None
+            if term in node:
+                pointer = node[term]
+            else:
+                for key, value in node.items():
+                    if SafePayloadUtils.key_matches(key, term) and isinstance(value, list):
+                        pointer = value
+                        break
+            if not isinstance(pointer, list):
+                continue
+            for item in pointer:
+                if isinstance(item, dict):
+                    outcome = self._build_outcome(item)
+                    if outcome is not None:
+                        resolved.append(outcome)
+                    continue
+                ref_id = SafePayloadUtils.coerce_str(item)
+                if ref_id is None:
+                    continue
+                indexed = odds_index.get(ref_id)
+                if indexed is not None:
+                    resolved.append(indexed)
+            if resolved:
+                return resolved
+        nested = self._find_container(node, "outcome_container", self.OUTCOME_LIST_TERMS) or []
+        for nested_node in nested:
+            outcome = self._build_outcome(nested_node)
+            if outcome is not None:
+                resolved.append(outcome)
+        return resolved
+
+    def _build_events(
+        self,
+        payload: Dict[str, Any],
+        odds_index: Dict[str, CanonicalOutcome],
+        market_entries: List[Dict[str, Any]],
+    ) -> List[CanonicalEvent]:
+        """Parse event rows and attach markets by containment, pointers, or event refs."""
+        events_by_key: Dict[str, CanonicalEvent] = {}
+        ordered_events: List[CanonicalEvent] = []
+        event_nodes = self._find_container(payload, "match_container", self.EVENT_LIST_TERMS) or []
+
+        for node in event_nodes:
+            if not isinstance(node, dict):
+                continue
+            identity = self._extract_event_identity(node)
+            key = identity["event_id"] or f"{identity['home_team']}|{identity['away_team']}"
+            event = events_by_key.get(key)
+            if event is None:
+                event = CanonicalEvent(
+                    event_id=identity["event_id"],
+                    home_team=identity["home_team"],
+                    away_team=identity["away_team"],
+                    start_time=identity["start_time"],
+                    raw_label=identity["raw_label"],
+                    source_provider=self.name,
+                    league=identity.get("league"),
+                    sport=identity.get("sport"),
+                )
+                events_by_key[key] = event
+                ordered_events.append(event)
+
+            attached_ids = {m.market_id for m in event.markets if m.market_id}
+
+            # Containment: market rows nested inside the event row.
+            nested_nodes = self._find_container(node, "market_container", self.MARKET_LIST_TERMS) or []
+            for nested_node in nested_nodes:
+                if not isinstance(nested_node, dict):
+                    continue
+                market = self._build_relational_market(nested_node, odds_index)
+                if market is not None and market.market_id not in attached_ids:
+                    event.markets.append(market)
+                    if market.market_id is not None:
+                        attached_ids.add(market.market_id)
+
+            # Pointer arrays on the event row (e.g. ``marketIds``).
+            for market in self._resolve_event_market_pointers(node, market_entries):
+                if market.market_id not in attached_ids:
+                    event.markets.append(market)
+                    if market.market_id is not None:
+                        attached_ids.add(market.market_id)
+
+        # Markets referencing events by eventId/parent pointers.
+        for entry in market_entries:
+            event_ref = entry["event_ref"]
+            if not event_ref:
+                continue
+            event = events_by_key.get(event_ref)
+            if event is None:
+                continue
+            market = entry["market"]
+            if market.market_id is not None and market.market_id in {
+                m.market_id for m in event.markets if m.market_id
+            }:
+                continue
+            event.markets.append(market)
+
+        return ordered_events
+
+    def _resolve_event_market_pointers(
+        self, node: Dict[str, Any], market_entries: List[Dict[str, Any]]
+    ) -> List[CanonicalMarket]:
+        """Resolve markets referenced by identifier pointer arrays on an event row."""
+        by_id: Dict[str, CanonicalMarket] = {
+            entry["market"].market_id: entry["market"]
+            for entry in market_entries
+            if entry["market"].market_id is not None
+        }
+        resolved: List[CanonicalMarket] = []
+        for term in self.MARKET_POINTER_TERMS:
+            pointer: Any = None
+            if term in node:
+                pointer = node[term]
+            else:
+                for key, value in node.items():
+                    if SafePayloadUtils.key_matches(key, term) and isinstance(value, list):
+                        pointer = value
+                        break
+            if not isinstance(pointer, list):
+                continue
+            for item in pointer:
+                ref_id = SafePayloadUtils.coerce_str(item)
+                market = by_id.get(ref_id) if ref_id else None
+                if market is not None:
+                    resolved.append(market)
+            if resolved:
+                return resolved
+        return resolved
+
 
 class DeepTraversalAdapter(ProviderAdapter):
     """Fallback adapter that structurally infers events and outcomes from any nesting.
@@ -857,7 +1085,13 @@ class OddsNormalizer:
         self._register_default_adapters()
 
     def _register_default_adapters(self) -> None:
-        for adapter_cls in (KambiStyleAdapter, GenericMarketsAdapter, GenericEventsAdapter, DeepTraversalAdapter):
+        for adapter_cls in (
+            KambiStyleAdapter,
+            RelationalEntitiesAdapter,
+            GenericMarketsAdapter,
+            GenericEventsAdapter,
+            DeepTraversalAdapter,
+        ):
             self._adapters.append(adapter_cls(self.ctx))
         self._sort_adapters()
 
@@ -1054,6 +1288,17 @@ if __name__ == "__main__":
         "league": "league",
         "sport": "sport",
     })
+
+    per_call_mappings = {
+        "home_team": "homeTeam",
+        "away_team": "awayTeam",
+        "match_container": "events",
+        "market_container": "betOffers",
+        "outcome_container": "outcomes",
+        "odds_value": "odds",
+        "league": "league",
+        "sport": "sport",
+    }
 
     for label, sample in (("kambi_style", SAMPLE_KAMBI_STYLE), ("generic_nested", SAMPLE_GENERIC_NESTED)):
         print(f"\n=== Normalizing sample: {label} ===")

@@ -2,75 +2,30 @@
 
 Provides deterministic, accent-insensitive, punctuation-free team name
 normalization so that the same club is matched identically across
-heterogeneous sportsbook feeds.
+heterogeneous sportsbook feeds. Vocabulary is loaded from
+`resolution/lexicon.json`.
 """
 
 import re
 import unicodedata
-from typing import Optional
+from typing import Optional, Set
 
-# Tokens that carry no disambiguating signal for club identity.
-# NOTE: candidate for migration into `sportsbook_lexicon.json` if the
-# lexicon is ever made a permitted dependency of this package.
-_CLUB_NOISE_TOKENS = frozenset(
-    {
-        "fc",
-        "cf",
-        "sc",
-        "afc",
-        "ac",
-        "as",
-        "ss",
-        "sss",
-        "sk",
-        "fk",
-        "bk",
-        "if",
-        "sv",
-        "tsv",
-        "vfl",
-        "vfb",
-        "sad",
-        "u19",
-        "u20",
-        "u21",
-        "u23",
-        "ii",
-        "b",
-        "reserves",
-        "reserve",
-        "women",
-        "w",
-    }
-)
+from resolution.lexicon import get_lexicon
 
 _PUNCTUATION_PATTERN = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
-def normalize_team_name(name: Optional[str]) -> str:
-    """Normalize a raw team name into a canonical comparison form.
-
-    The transformation pipeline is: safe string coercion, Unicode NFKD
-    decomposition with diacritic stripping, lowercasing, punctuation
-    removal, whitespace collapsing, and removal of club noise tokens.
-
-    Args:
-        name: The raw team name as provided by the source feed.
-
-    Returns:
-        The normalized team name. Returns an empty string when the input
-        is ``None`` or contains no usable characters.
-    """
+def _normalize_tokens(name: Optional[str], drop_cosmetic: bool) -> list:
+    """Shared normalization pipeline returning the kept token list."""
     if name is None:
-        return ""
+        return []
 
     try:
         text = str(name)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Team name could not be coerced to string: {exc}") from exc
 
-    # Strip accents/diacritics via NFKD decomposition.
     decomposed = unicodedata.normalize("NFKD", text)
     without_accents = "".join(
         char for char in decomposed if not unicodedata.combining(char)
@@ -81,9 +36,39 @@ def normalize_team_name(name: Optional[str]) -> str:
     collapsed = _WHITESPACE_PATTERN.sub(" ", without_punctuation).strip()
 
     if not collapsed:
-        return ""
+        return []
 
-    kept_tokens = [
-        token for token in collapsed.split(" ") if token not in _CLUB_NOISE_TOKENS
-    ]
-    return " ".join(kept_tokens)
+    tokens = collapsed.split(" ")
+    if drop_cosmetic:
+        cosmetic = get_lexicon().cosmetic_noise_tokens
+        tokens = [token for token in tokens if token not in cosmetic]
+    return tokens
+
+
+def normalize_team_name(name: Optional[str]) -> str:
+    """Normalize a raw team name into a canonical comparison form.
+
+    Cosmetic club noise tokens are removed; semantic category
+    discriminators (youth/reserve/gender markers) are intentionally
+    preserved so that e.g. "Arsenal U21" and "Arsenal" never normalize
+    to the same string.
+    """
+    return " ".join(_normalize_tokens(name, drop_cosmetic=True))
+
+
+def extract_category_markers(name: Optional[str]) -> Set[str]:
+    """Extract semantic category markers present in a team name.
+
+    Args:
+        name: Raw team name.
+
+    Returns:
+        Set of category identifiers (e.g. ``{"youth"}``, ``{"reserve",
+        "gender"}``). Empty when no discriminator tokens are present.
+    """
+    lexicon = get_lexicon()
+    return {
+        lexicon.category_for(token)
+        for token in _normalize_tokens(name, drop_cosmetic=False)
+        if lexicon.category_for(token) is not None
+    }

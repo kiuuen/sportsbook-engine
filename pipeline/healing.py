@@ -148,3 +148,23 @@ class FailureHealer:
             logger.warning(f"[FailureHealer] Transient error on '{endpoint_key}': {err}")
         self._register_backoff(endpoint_key)
         return False
+
+    def register_backoff(self, endpoint_key: str) -> None:
+        """Public wrapper: increment the consecutive failure counter for an endpoint."""
+        self._register_backoff(endpoint_key)
+
+    def reset_backoff(self, endpoint_key: str) -> None:
+        """Public wrapper: clear the failure counter for an endpoint after a success."""
+        self._reset_backoff(endpoint_key)
+
+    def backoff_delay(self, endpoint_key: str) -> float:
+        """Public wrapper: current capped exponential backoff delay for an endpoint."""
+        return self._backoff_delay(endpoint_key)
+
+    async def sleep_or_shutdown(self, delay: float) -> None:
+        """Public wrapper: sleep for ``delay`` seconds unless shutdown is requested."""
+        await self._sleep_or_shutdown(delay)
+
+    async def handle_execution_failure(self, endpoint_key: str, err: Exception) -> bool:
+        """Public wrapper: classify a failure; True when a retry should happen immediately."""
+        return await self._handle_execution_failure(endpoint_key, err)

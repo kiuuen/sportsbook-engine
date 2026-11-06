@@ -14,6 +14,7 @@ from database_manager import DatabaseManager
 from pipeline.healing import FailureHealer
 from replay_executor import ReplayExecutor
 from streaming_executor import StreamingExecutor
+from odds_normalizer import CanonicalEvent, OddsNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,24 @@ class PipelineWorkers:
         self.detail_poll_interval = max(float(detail_poll_interval), 1.0)
         self.request_timeout = max(float(request_timeout), 1.0)
         self._active_entity_ids: Dict[str, Set[Any]] = {}
+        try:
+            self.normalizer = OddsNormalizer()
+        except Exception as err:
+            logger.error(
+                f"[PipelineWorkers] Failed to initialize OddsNormalizer for "
+                f"'{self.target_domain}': {err}"
+            )
+            self.normalizer = None
+        else:
+            try:
+                self.normalizer.load_field_mappings_from_db(
+                    self.target_domain, self.db_manager
+                )
+            except Exception as err:
+                logger.warning(
+                    f"[PipelineWorkers] Failed to load field mappings for "
+                    f"'{self.target_domain}': {err}"
+                )
 
     # ------------------------------------------------------------------ #
     # Executor construction
@@ -93,6 +112,35 @@ class PipelineWorkers:
                 f"'{self.target_domain}' (falling back to HTTP polling): {err}"
             )
             return None
+
+    def _normalize_response(self, response: Any, context_label: str) -> None:
+        """Normalize a raw API response and log the canonical extraction yield.
+
+        Normalization failures are logged and swallowed so they never crash
+        the worker loops.
+        """
+        if self.normalizer is None:
+            return
+        try:
+            events: List[CanonicalEvent] = self.normalizer.normalize(response)
+        except Exception as err:
+            logger.warning(
+                f"[PipelineWorkers] Normalization failed for {context_label}: {err}"
+            )
+            return
+        market_count = sum(len(event.markets) for event in events)
+        odds_count = sum(
+            1
+            for event in events
+            for market in event.markets
+            for outcome in market.outcomes
+            if outcome.odds_decimal is not None
+        )
+        logger.info(
+            f"[PipelineWorkers] Normalized {context_label}: "
+            f"{len(events)} event(s), {market_count} market(s), "
+            f"{odds_count} decimal odds value(s)."
+        )
 
     # ------------------------------------------------------------------ #
     # Entity harvesting and parameter mapping
@@ -209,6 +257,7 @@ class PipelineWorkers:
                         timeout=self.request_timeout,
                     )
                     self.update_active_entity_ids(key, executor, response)
+                    self._normalize_response(response, f"harvest endpoint '{key}'")
                     new_ids = self.harvest_event_ids(executor, key, response)
                     self.healer.reset_backoff(key)
                     logger.info(
@@ -290,6 +339,11 @@ class PipelineWorkers:
                                 timeout=self.request_timeout,
                             )
                             self.update_active_entity_ids(endpoint_key, executor, response)
+                            self._normalize_response(
+                                response,
+                                f"detail endpoint '{endpoint_key}' "
+                                f"(event={str(event_id) if event_id is not None else 'static'})",
+                            )
                             self.healer.reset_backoff(endpoint_key)
                             label = str(event_id) if event_id is not None else "static"
                             logger.info(

@@ -25,6 +25,8 @@ HARVEST_ROLES: Tuple[str, ...] = ("live_overview", "fixtures_list")
 DETAIL_ROLES: Tuple[str, ...] = ("odds_detail",)
 # Parameter names recognized as active match/event identifiers.
 EVENT_ID_PARAMS: Tuple[str, ...] = ("event_id", "match_id", "eventid", "matchid")
+# Consecutive HTTP 400 failures before an endpoint is quarantined for the session.
+CLIENT_ERROR_QUARANTINE_THRESHOLD: int = 3
 
 # Pre-normalized event-ID parameter names for exact-match comparisons.
 _EVENT_ID_NORMALIZED: frozenset = frozenset(
@@ -72,6 +74,8 @@ class PipelineWorkers:
         self.detail_poll_interval = max(float(detail_poll_interval), 1.0)
         self.request_timeout = max(float(request_timeout), 1.0)
         self._active_entity_ids: Dict[str, Set[Any]] = {}
+        self._endpoint_400_counts: Dict[str, int] = {}
+        self._quarantined_endpoints: Set[str] = set()
         try:
             self.normalizer = OddsNormalizer()
         except Exception as err:
@@ -398,6 +402,39 @@ class PipelineWorkers:
                 params[param] = event_id
         return params or None
 
+    def _purge_entity_id(self, event_id: Any) -> None:
+        """Remove a dead event ID from every event-ID bucket in active rotation.
+
+        Only buckets whose key normalizes to a known event-ID parameter are
+        touched, so unrelated namespaces (e.g. ``sport_id``) can never be
+        purged by a coincidental value match.
+        """
+        for param in list(self._active_entity_ids.keys()):
+            if _normalize_param_name(param) in _EVENT_ID_NORMALIZED:
+                bucket = self._active_entity_ids[param]
+                bucket.discard(event_id)
+                if not bucket:
+                    del self._active_entity_ids[param]
+
+    def _register_client_error(self, endpoint_key: str, status: int) -> bool:
+        """Track consecutive HTTP 400 failures and quarantine at the threshold.
+
+        Returns:
+            True when the endpoint has just been quarantined.
+        """
+        if status != 400:
+            return False
+        count = self._endpoint_400_counts.get(endpoint_key, 0) + 1
+        self._endpoint_400_counts[endpoint_key] = count
+        if count >= CLIENT_ERROR_QUARANTINE_THRESHOLD:
+            self._quarantined_endpoints.add(endpoint_key)
+            logger.warning(
+                f"[PipelineWorkers] Endpoint '{endpoint_key}' quarantined for the "
+                f"remainder of the session after {count} consecutive HTTP 400 errors."
+            )
+            return True
+        return False
+
     # ------------------------------------------------------------------ #
     # Worker loops
     # ------------------------------------------------------------------ #
@@ -450,6 +487,13 @@ class PipelineWorkers:
                 if executor is None:
                     await self.healer.sleep_or_shutdown(self.detail_poll_interval)
                     continue
+
+            if endpoint_key in self._quarantined_endpoints:
+                logger.debug(
+                    f"[PipelineWorkers] Skipping quarantined endpoint '{endpoint_key}'."
+                )
+                await self.healer.sleep_or_shutdown(self.detail_poll_interval)
+                continue
 
             endpoint_info = executor.endpoints.get(endpoint_key, {})
             protocol = str(endpoint_info.get("protocol", "https")).lower()
@@ -524,6 +568,7 @@ class PipelineWorkers:
                                 f"(event={str(event_id) if event_id is not None else 'static'})",
                             )
                             self.healer.reset_backoff(endpoint_key)
+                            self._endpoint_400_counts.pop(endpoint_key, None)
                             label = str(event_id) if event_id is not None else "static"
                             logger.info(
                                 f"[PipelineWorkers] Detail poll succeeded for "
@@ -532,6 +577,20 @@ class PipelineWorkers:
                         except asyncio.CancelledError:
                             raise
                         except Exception as err:
+                            status = self.healer.extract_http_status(err)
+                            if status in (400, 404):
+                                if event_id is not None:
+                                    self._purge_entity_id(event_id)
+                                    logger.warning(
+                                        f"[PipelineWorkers] Purging stale event ID "
+                                        f"'{event_id}' from '{endpoint_key}' after "
+                                        f"HTTP {status}."
+                                    )
+                                if status == 400 and self._register_client_error(
+                                    endpoint_key, status
+                                ):
+                                    break  # Quarantined; outer loop will skip future cycles.
+                                continue  # No backoff: advance to the next event ID.
                             refreshed = await self.healer.handle_execution_failure(
                                 endpoint_key, err
                             )

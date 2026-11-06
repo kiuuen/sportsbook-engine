@@ -77,6 +77,16 @@ class FailureHealer:
         """Return True when the error represents an HTTP 429 rate limit."""
         return cls._extract_http_status(err) == 429
 
+    @classmethod
+    def _is_client_error(cls, err: BaseException) -> bool:
+        """Return True when the error represents HTTP 400/404.
+
+        These statuses signal a dead entity ID or an invalid endpoint
+        template, not a transient network condition, so they must never
+        feed the exponential backoff machinery.
+        """
+        return cls._extract_http_status(err) in (400, 404)
+
     def _register_backoff(self, endpoint_key: str) -> None:
         """Increment the consecutive failure counter for an endpoint."""
         self._endpoint_failures[endpoint_key] = self._endpoint_failures.get(endpoint_key, 0) + 1
@@ -131,7 +141,10 @@ class FailureHealer:
 
         Returns:
             True when the failure was resolved via a session refresh and the
-            caller should retry immediately; False otherwise (backoff applied).
+            caller should retry immediately; False otherwise. Client errors
+            (HTTP 400/404) return False without registering backoff: they
+            indicate a dead entity ID or an invalid endpoint template and are
+            expected to be handled by the caller (entity purging/quarantine).
         """
         if self._is_auth_failure(err):
             logger.warning(
@@ -141,6 +154,13 @@ class FailureHealer:
             if await self._handle_session_refresh(endpoint_key):
                 return True
             self._register_backoff(endpoint_key)
+            return False
+        if self._is_client_error(err):
+            logger.warning(
+                f"[FailureHealer] Client error on '{endpoint_key}' "
+                f"(HTTP {self._extract_http_status(err)}); entity likely dead or "
+                f"endpoint template invalid; no backoff registered."
+            )
             return False
         if self._is_rate_limit(err):
             logger.warning(f"[FailureHealer] Rate limit hit on '{endpoint_key}'; backing off.")
@@ -168,3 +188,13 @@ class FailureHealer:
     async def handle_execution_failure(self, endpoint_key: str, err: Exception) -> bool:
         """Public wrapper: classify a failure; True when a retry should happen immediately."""
         return await self._handle_execution_failure(endpoint_key, err)
+
+    @classmethod
+    def is_client_error(cls, err: BaseException) -> bool:
+        """Public wrapper: True when the error represents HTTP 400/404."""
+        return cls._is_client_error(err)
+
+    @staticmethod
+    def extract_http_status(err: BaseException) -> Optional[int]:
+        """Public wrapper: extract an HTTP status code from an error message."""
+        return FailureHealer._extract_http_status(err)

@@ -8,6 +8,7 @@ resilience handling (see :mod:`pipeline.healing`), and worker logic separated.
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database_manager import DatabaseManager
@@ -25,6 +26,19 @@ DETAIL_ROLES: Tuple[str, ...] = ("odds_detail",)
 # Parameter names recognized as active match/event identifiers.
 EVENT_ID_PARAMS: Tuple[str, ...] = ("event_id", "match_id", "eventid", "matchid")
 
+# Pre-normalized event-ID parameter names for exact-match comparisons.
+_EVENT_ID_NORMALIZED: frozenset = frozenset(
+    _normalize_param_name(p) for p in EVENT_ID_PARAMS
+)
+
+def _normalize_param_name(param: Any) -> str:
+    """Normalize a parameter name for exact matching against JSON keys.
+
+    Strips placeholder braces and all non-alphanumeric characters, so
+    ``{event_id}``, ``EventId``, and ``event-id`` all normalize to
+    ``eventid``.
+    """
+    return re.sub(r"[^a-z0-9]", "", str(param).lower().replace("{", "").replace("}", ""))
 
 class PipelineWorkers:
     """Builds executors and runs harvest/detail worker loops for one target.
@@ -146,29 +160,100 @@ class PipelineWorkers:
     # Entity harvesting and parameter mapping
     # ------------------------------------------------------------------ #
 
+    @classmethod
+    def _harvest_declared_params(
+        cls,
+        node: Any,
+        declared_map: Dict[str, str],
+        harvested: Dict[str, List[Any]],
+    ) -> None:
+        """Collect values whose JSON keys exactly match schema-declared parameters.
+
+        Args:
+            node: Arbitrary JSON node (dict, list, or scalar) to walk.
+            declared_map: Mapping of normalized parameter name -> declared name
+                taken from the endpoint's ``provides_parameters``.
+            harvested: Output accumulator keyed by declared parameter name.
+
+        Unlike the legacy heuristic scraper, this never infers ownership from a
+        generic ``*id`` key suffix, so ``sportId`` values can never leak into the
+        ``event_id`` bucket. A bare ``id`` key is accepted only when exactly one
+        id-like parameter is declared (unambiguous context).
+        """
+        if isinstance(node, dict):
+            bare_id_target: Optional[str] = None
+            id_like = [orig for norm, orig in declared_map.items() if norm.endswith("id")]
+            if len(id_like) == 1:
+                bare_id_target = id_like[0]
+            for key, value in node.items():
+                normalized = _normalize_param_name(key)
+                target = declared_map.get(normalized)
+                if target is None and normalized == "id" and bare_id_target is not None:
+                    target = bare_id_target
+                if (
+                    target is not None
+                    and isinstance(value, (str, int))
+                    and not isinstance(value, bool)
+                ):
+                    harvested.setdefault(target, []).append(value)
+                cls._harvest_declared_params(value, declared_map, harvested)
+        elif isinstance(node, list):
+            for item in node:
+                cls._harvest_declared_params(item, declared_map, harvested)
+
     def update_active_entity_ids(
         self, endpoint_key: str, executor: ReplayExecutor, response: Any
     ) -> None:
-        """Update active entity IDs from a response based on provided parameters."""
+        """Update typed entity-ID buckets from a response using declared parameters.
+
+        Only parameters the endpoint explicitly declares in
+        ``provides_parameters`` are harvested, each into its own bucket, so
+        ``sport_id`` and ``event_id`` namespaces never cross-contaminate.
+        """
         if not isinstance(response, dict):
             return
         endpoint_info = executor.endpoints.get(endpoint_key, {})
         provided_params = endpoint_info.get("provides_parameters", [])
         if not isinstance(provided_params, list):
             provided_params = []
+        declared_map = {
+            _normalize_param_name(p): str(p)
+            for p in provided_params
+            if isinstance(p, str) and _normalize_param_name(p)
+        }
+        if not declared_map:
+            return
         harvested: Dict[str, List[Any]] = {}
-        executor._harvest_identifiers(response, set(provided_params), harvested)
-        for param in provided_params:
-            values = harvested.get(param)
+        self._harvest_declared_params(response, declared_map, harvested)
+        for param, values in harvested.items():
             if values:
-                self._active_entity_ids[param] = set(values)
+                self._active_entity_ids.setdefault(param, set()).update(values)
 
     def harvest_event_ids(
         self, executor: ReplayExecutor, endpoint_key: str, response: Any
     ) -> int:
-        """Harvest event/match identifiers from a harvest-root response."""
+        """Harvest event/match identifiers declared by the endpoint's schema.
+
+        Only ``provides_parameters`` entries that normalize to a known event-ID
+        parameter are collected, using exact key matching. Endpoints that do not
+        declare an event-ID parameter (e.g., catalog roots providing ``sport_id``)
+        contribute nothing, preventing sport/category IDs from being stored as
+        match identifiers.
+        """
+        endpoint_info = executor.endpoints.get(endpoint_key, {})
+        provided = endpoint_info.get("provides_parameters", [])
+        if not isinstance(provided, list):
+            provided = []
+        event_params = [
+            str(p)
+            for p in provided
+            if isinstance(p, str) and _normalize_param_name(p) in _EVENT_ID_NORMALIZED
+        ]
+        if not event_params:
+            return 0
+        declared_map = {_normalize_param_name(p): p for p in event_params}
         harvested: Dict[str, List[Any]] = {}
-        executor._harvest_identifiers(response, set(EVENT_ID_PARAMS), harvested)
+        self._harvest_declared_params(response, declared_map, harvested)
         new_count = 0
         for param, values in harvested.items():
             bucket = self._active_entity_ids.setdefault(param, set())
@@ -176,6 +261,84 @@ class PipelineWorkers:
             bucket.update(values)
             new_count += len(bucket) - before
         return new_count
+
+    def resolve_endpoint_params(
+        self, executor: ReplayExecutor, endpoint_key: str
+    ) -> Dict[str, Any]:
+        """Build explicit request parameters from typed entity-ID buckets.
+
+        Only schema-declared ``dynamic_parameters`` are populated, each strictly
+        from its own bucket. Any parameter still missing is delegated to
+        :meth:`ReplayExecutor._resolve_dynamic_params`, which chains through the
+        stored dependency graph (declared producers first, then catalog-root
+        roles), enabling hierarchical fetches such as
+        ``catalog_root -> sport_id -> fixtures_list -> event_id``.
+        """
+        endpoint_info = executor.endpoints.get(endpoint_key, {})
+        required = endpoint_info.get("dynamic_parameters", [])
+        if not isinstance(required, list):
+            required = []
+        explicit: Dict[str, Any] = {}
+        for param in required:
+            if not isinstance(param, str) or not param:
+                continue
+            values = self._active_entity_ids.get(param) or self._active_entity_ids.get(
+                _normalize_param_name(param)
+            )
+            if values:
+                explicit[param] = sorted(values, key=lambda v: str(v))[0]
+        try:
+            return executor._resolve_dynamic_params(endpoint_key, explicit)
+        except Exception as err:
+            logger.warning(
+                f"[PipelineWorkers] Dependency-chain resolution failed for "
+                f"'{endpoint_key}'; using explicitly resolved params only: {err}"
+            )
+            return explicit
+
+    @staticmethod
+    def order_harvest_keys(
+        executor: ReplayExecutor, harvest_keys: List[str]
+    ) -> List[str]:
+        """Topologically order harvest roots so parameter producers run first.
+
+        A harvest root A precedes root B when A declares a
+        ``provides_parameters`` entry that B requires in ``dynamic_parameters``.
+        Cycles or unresolved cross-dependencies fall back to appending the
+        remaining keys in their original order.
+        """
+        if len(harvest_keys) < 2:
+            return list(harvest_keys)
+        provides_map: Dict[str, Set[str]] = {}
+        requires_map: Dict[str, Set[str]] = {}
+        for key in harvest_keys:
+            info = executor.endpoints.get(key, {})
+            provides = info.get("provides_parameters", [])
+            requires = info.get("dynamic_parameters", [])
+            provides_map[key] = {
+                _normalize_param_name(p) for p in provides if isinstance(p, str)
+            }
+            requires_map[key] = {
+                _normalize_param_name(p) for p in requires if isinstance(p, str)
+            }
+        dependencies: Dict[str, Set[str]] = {}
+        for key in harvest_keys:
+            dependencies[key] = {
+                other
+                for other in harvest_keys
+                if other != key and provides_map.get(other, set()) & requires_map[key]
+            }
+        ordered: List[str] = []
+        pending = list(harvest_keys)
+        while pending:
+            ready = [k for k in pending if not (dependencies[k] - set(ordered))]
+            if not ready:
+                ordered.extend(pending)
+                break
+            for key in ready:
+                ordered.append(key)
+                pending.remove(key)
+        return ordered
 
     @staticmethod
     def classify_endpoints(
@@ -190,10 +353,10 @@ class PipelineWorkers:
             provides = info.get("provides_parameters", [])
             requires = info.get("dynamic_parameters", [])
             provides_event = any(
-                str(p).lower() in EVENT_ID_PARAMS for p in provides if isinstance(provides, list)
+                _normalize_param_name(p) in _EVENT_ID_NORMALIZED for p in provides if isinstance(provides, list)
             )
             requires_event = any(
-                str(p).lower() in EVENT_ID_PARAMS for p in requires if isinstance(requires, list)
+                _normalize_param_name(p) in _EVENT_ID_NORMALIZED for p in requires if isinstance(requires, list)
             )
             role = str(info.get("role", ""))
             if role in HARVEST_ROLES or provides_event:
@@ -213,8 +376,10 @@ class PipelineWorkers:
         if not isinstance(required_params, list):
             required_params = []
         for param in required_params:
-            if str(param).lower() in EVENT_ID_PARAMS:
-                ids = self._active_entity_ids.get(param, set())
+            if _normalize_param_name(param) in _EVENT_ID_NORMALIZED:
+                ids = self._active_entity_ids.get(param) or self._active_entity_ids.get(
+                    _normalize_param_name(param)
+                ) or set()
                 if not ids:
                     return []
                 return sorted(ids, key=lambda value: str(value))
@@ -229,7 +394,7 @@ class PipelineWorkers:
             return None
         params: Dict[str, Any] = {}
         for param in required_params:
-            if isinstance(param, str) and param.lower() in EVENT_ID_PARAMS:
+            if isinstance(param, str) and _normalize_param_name(param) in _EVENT_ID_NORMALIZED:
                 params[param] = event_id
         return params or None
 
@@ -248,12 +413,14 @@ class PipelineWorkers:
                 if executor is None:
                     await self.healer.sleep_or_shutdown(self.harvest_interval)
                     continue
-            for key in harvest_keys:
+                ordered_keys = self.order_harvest_keys(executor, harvest_keys)
+            for key in ordered_keys:
                 if self._shutdown_event.is_set():
                     break
                 try:
+                    params = self.resolve_endpoint_params(executor, key)
                     response = await asyncio.wait_for(
-                        asyncio.to_thread(executor.execute, key),
+                        asyncio.to_thread(executor.execute, key, params),
                         timeout=self.request_timeout,
                     )
                     self.update_active_entity_ids(key, executor, response)
@@ -332,7 +499,19 @@ class PipelineWorkers:
                     for event_id in event_ids:
                         if self._shutdown_event.is_set():
                             break
-                        params = self.build_params(required_params, event_id)
+                        params = self.build_params(required_params, event_id) or {}
+                        for param in required_params:
+                            if (
+                                isinstance(param, str)
+                                and param
+                                and _normalize_param_name(param) not in _EVENT_ID_NORMALIZED
+                                and param not in params
+                            ):
+                                values = self._active_entity_ids.get(param) or self._active_entity_ids.get(
+                                    _normalize_param_name(param)
+                                ) or set()
+                                if values:
+                                    params[param] = sorted(values, key=lambda v: str(v))[0]
                         try:
                             response = await asyncio.wait_for(
                                 asyncio.to_thread(executor.execute, endpoint_key, params),

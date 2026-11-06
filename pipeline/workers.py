@@ -28,10 +28,6 @@ EVENT_ID_PARAMS: Tuple[str, ...] = ("event_id", "match_id", "eventid", "matchid"
 # Consecutive HTTP 400 failures before an endpoint is quarantined for the session.
 CLIENT_ERROR_QUARANTINE_THRESHOLD: int = 3
 
-# Pre-normalized event-ID parameter names for exact-match comparisons.
-_EVENT_ID_NORMALIZED: frozenset = frozenset(
-    _normalize_param_name(p) for p in EVENT_ID_PARAMS
-)
 
 def _normalize_param_name(param: Any) -> str:
     """Normalize a parameter name for exact matching against JSON keys.
@@ -40,7 +36,18 @@ def _normalize_param_name(param: Any) -> str:
     ``{event_id}``, ``EventId``, and ``event-id`` all normalize to
     ``eventid``.
     """
-    return re.sub(r"[^a-z0-9]", "", str(param).lower().replace("{", "").replace("}", ""))
+    try:
+        text = str(param)
+    except Exception as err:
+        logger.warning(f"[PipelineWorkers] Failed to stringify parameter {param!r}: {err}")
+        return ""
+    return re.sub(r"[^a-z0-9]", "", text.lower().replace("{", "").replace("}", ""))
+
+
+# Pre-normalized event-ID parameter names for exact-match comparisons.
+_EVENT_ID_NORMALIZED: frozenset = frozenset(
+    _normalize_param_name(p) for p in EVENT_ID_PARAMS
+)
 
 class PipelineWorkers:
     """Builds executors and runs harvest/detail worker loops for one target.
@@ -406,8 +413,8 @@ class PipelineWorkers:
         """Remove a dead event ID from every event-ID bucket in active rotation.
 
         Only buckets whose key normalizes to a known event-ID parameter are
-        touched, so unrelated namespaces (e.g. ``sport_id``) can never be
-        purged by a coincidental value match.
+        touched, so unrelated namespaces (e.g. ``sport_id``) can never
+        be purged by a coincidental value match.
         """
         for param in list(self._active_entity_ids.keys()):
             if _normalize_param_name(param) in _EVENT_ID_NORMALIZED:

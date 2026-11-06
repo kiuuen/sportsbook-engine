@@ -44,17 +44,33 @@ def _normalize_tokens(name: Optional[str], drop_cosmetic: bool) -> list:
         tokens = [token for token in tokens if token not in cosmetic]
     return tokens
 
+def _apply_aliases(tokens: list) -> list:
+    """Expand known team aliases and token synonyms.
+
+    A full-name alias match (e.g. "psg") replaces the entire token
+    list with its canonical expansion; otherwise each token is checked
+    against the single-token synonym map (e.g. "utd" -> "united").
+    """
+    lexicon = get_lexicon()
+    joined = " ".join(tokens)
+    canonical = lexicon.canonical_for_alias(joined)
+    if canonical:
+        return canonical.split(" ")
+    synonyms = lexicon.token_synonyms
+    return [synonyms.get(token, token) for token in tokens]
 
 def normalize_team_name(name: Optional[str]) -> str:
     """Normalize a raw team name into a canonical comparison form.
 
     Cosmetic club noise tokens are removed; semantic category
     discriminators (youth/reserve/gender markers) are intentionally
-    preserved so that e.g. "Arsenal U21" and "Arsenal" never normalize
-    to the same string.
+    preserved. Known aliases and abbreviations are expanded to their
+    canonical form so that e.g. "Man Utd" and "Manchester United"
+    normalize to the same string, while "Arsenal U21" and "Arsenal"
+    still never collide.
     """
-    return " ".join(_normalize_tokens(name, drop_cosmetic=True))
-
+    tokens = _normalize_tokens(name, drop_cosmetic=True)
+    return " ".join(_apply_aliases(tokens))
 
 def extract_category_markers(name: Optional[str]) -> Set[str]:
     """Extract semantic category markers present in a team name.

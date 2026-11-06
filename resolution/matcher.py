@@ -9,6 +9,7 @@ import datetime
 import uuid
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from difflib import SequenceMatcher
 
 from resolution.cleaner import extract_category_markers, normalize_team_name
 
@@ -27,6 +28,9 @@ _TEMPORAL_MAX_WINDOW_HOURS = 48.0
 # Minimum aligned name-token similarity for a match decision.
 _NAME_MATCH_THRESHOLD = 0.5
 
+# Minimum per-token fuzzy similarity (or prefix relationship) for two
+# tokens to be considered the same word.
+_TOKEN_FUZZY_THRESHOLD = 0.8
 
 def parse_start_time_utc(start_time: Optional[str]) -> Optional[datetime.datetime]:
     """Parse a raw start timestamp into an aware UTC datetime.
@@ -147,16 +151,44 @@ class MatchDecision:
     category_conflict: bool
     reason: str
 
+def _tokens_match(a: str, b: str) -> bool:
+    """Decide whether two tokens represent the same word.
+
+    Accepts exact equality, a shared prefix of at least three characters
+    (covers truncated forms such as "man" / "manchester"), and minor
+    spelling differences via SequenceMatcher ratio.
+    """
+    if a == b:
+        return True
+    if len(a) >= 3 and len(b) >= 3 and (a.startswith(b) or b.startswith(a)):
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= _TOKEN_FUZZY_THRESHOLD
+
 
 def _token_similarity(a: str, b: str) -> float:
-    """Jaccard similarity between the token sets of two normalized names."""
+    """Fuzzy Jaccard similarity between the tokens of two normalized names.
+
+    Tokens are paired greedily one-to-one using :func:`_tokens_match`,
+    so partial matches, shared roots, and minor misspellings contribute
+    similarity instead of collapsing the score to zero.
+    """
     if not a or not b:
         return 0.0
-    tokens_a, tokens_b = set(a.split(" ")), set(b.split(" "))
+    tokens_a, tokens_b = a.split(" "), b.split(" ")
     if not tokens_a or not tokens_b:
         return 0.0
-    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
 
+    matched = 0
+    used_b: set = set()
+    for token_a in tokens_a:
+        for index, token_b in enumerate(tokens_b):
+            if index in used_b:
+                continue
+            if _tokens_match(token_a, token_b):
+                used_b.add(index)
+                matched += 1
+                break
+    return matched / (len(tokens_a) + len(tokens_b) - matched)
 
 def _name_alignment_score(
     home_a: str, away_a: str, home_b: str, away_b: str

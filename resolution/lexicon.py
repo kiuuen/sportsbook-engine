@@ -21,6 +21,8 @@ class ResolutionLexicon:
         self._cosmetic: FrozenSet[str] = frozenset()
         self._categories: Dict[str, FrozenSet[str]] = {}
         self._token_to_category: Dict[str, str] = {}
+        self._token_synonyms: Dict[str, str] = {}
+        self._team_aliases: Dict[str, str] = {}
         self.load()
 
     def load(self) -> None:
@@ -37,6 +39,15 @@ class ResolutionLexicon:
             for category, tokens in self._categories.items()
             for token in tokens
         }
+        self._token_synonyms = {
+            key.lower(): value.lower()
+            for key, value in data.get("token_synonyms", {}).items()
+        }
+        self._team_aliases = {
+            alias.strip().lower(): canonical.strip().lower()
+            for canonical, aliases in data.get("team_aliases", {}).items()
+            for alias in aliases
+        }
 
     @property
     def cosmetic_noise_tokens(self) -> FrozenSet[str]:
@@ -46,9 +57,17 @@ class ResolutionLexicon:
     def category_discriminators(self) -> Dict[str, FrozenSet[str]]:
         return self._categories
 
+    @property
+    def token_synonyms(self) -> Dict[str, str]:
+        return self._token_synonyms
+
     def category_for(self, token: str) -> Optional[str]:
         """Return the semantic category a token belongs to, if any."""
         return self._token_to_category.get(token.lower())
+
+    def canonical_for_alias(self, alias: str) -> Optional[str]:
+        """Return the canonical team name for a known alias, if any."""
+        return self._team_aliases.get(alias.strip().lower())
 
 
 @lru_cache(maxsize=None)

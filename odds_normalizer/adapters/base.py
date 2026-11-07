@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from heuristic_classifier import LexiconManager
 from odds_normalizer.classifier import MarketClassifier
-from odds_normalizer.models import CanonicalEvent, CanonicalMarket, CanonicalOutcome
+from odds_normalizer.models import (
+    CanonicalEvent,
+    CanonicalMarket,
+    CanonicalMarketType,
+    CanonicalOutcome,
+)
 from odds_normalizer.utils import FieldMappingResolver, OddsConverter, SafePayloadUtils
 
 logger = logging.getLogger("odds_normalizer")
@@ -216,10 +221,19 @@ class ProviderAdapter:
     # Shared defensive extraction helpers available to all adapters.
     # ------------------------------------------------------------------
     def _extract_event_identity(self, node: Any) -> Dict[str, Optional[str]]:
+        """Extract event identity with a cascading structural fallback tier.
+
+        Tier 1 resolves identity fields via learned target mappings and
+        lexicon-driven key lookups. When ``home_team``/``away_team`` remain
+        unresolved, Tier 2a attempts syntactic decomposition of raw label/title
+        strings found on the node, and Tier 2b backpropagates competitor names
+        from primary moneyline-style market outcomes. Both fallbacks rely
+        exclusively on structural heuristics and stay provider-agnostic.
+        """
         utils = self.ctx.utils
         specific_id = utils.coerce_str(self._mapped_lookup(node, "event_id", self.event_id_terms))
         generic_id = utils.coerce_str(utils.find_first(node, self.generic_id_terms))
-        return {
+        identity: Dict[str, Optional[str]] = {
             "event_id": specific_id or generic_id,
             "home_team": utils.coerce_str(self._mapped_lookup(node, "home_team", self.home_terms)),
             "away_team": utils.coerce_str(self._mapped_lookup(node, "away_team", self.away_terms)),
@@ -228,6 +242,134 @@ class ProviderAdapter:
             "sport": utils.coerce_str(self._mapped_lookup(node, "sport", self.sport_terms)),
             "raw_label": utils.coerce_str(self._mapped_lookup(node, "event_label", self.event_label_terms)),
         }
+        if not identity["home_team"] or not identity["away_team"]:
+            self._apply_structural_team_fallbacks(node, identity)
+        return identity
+
+    _LABEL_SCAN_DEPTH = 4
+
+    def _apply_structural_team_fallbacks(self, node: Any, identity: Dict[str, Optional[str]]) -> None:
+        """Fill missing home/away slots via structural inference, never overwriting.
+
+        Order: syntactic label decomposition first; outcome-based
+        backpropagation only when decomposition cannot produce a confident
+        two-entity split. Any failure is contained and logged.
+        """
+        try:
+            if identity["home_team"] and identity["away_team"]:
+                return
+            labels = self._collect_event_label_strings(node)
+            home, away = self._decompose_teams_from_labels(labels)
+            if not (home and away):
+                home, away = self._infer_teams_from_outcomes(node)
+            if not identity["home_team"] and home:
+                identity["home_team"] = home
+            if not identity["away_team"] and away:
+                identity["away_team"] = away
+        except Exception as exc:
+            logger.warning(f"[{self.name}] Structural team fallback failed: {exc}")
+
+    def _collect_event_label_strings(self, node: Any) -> List[str]:
+        """Collect raw label/title strings from the node for syntactic decomposition.
+
+        The mapped/lexicon-resolved event label is tried first, followed by a
+        depth-limited BFS over string values stored under label-matching keys.
+        """
+        utils = self.ctx.utils
+        candidates: List[str] = []
+        seen: Set[str] = set()
+        primary = utils.coerce_str(self._mapped_lookup(node, "event_label", self.event_label_terms))
+        if primary:
+            candidates.append(primary)
+            seen.add(primary.lower())
+        queue: List[Tuple[Any, int]] = [(node, 0)]
+        while queue:
+            current, depth = queue.pop(0)
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    if any(utils.key_matches(key, term) for term in self.event_label_terms):
+                        text = utils.coerce_str(self._unwrap_named(value))
+                        if text and text.lower() not in seen:
+                            seen.add(text.lower())
+                            candidates.append(text)
+                    if depth + 1 <= self._LABEL_SCAN_DEPTH and isinstance(value, (dict, list)):
+                        queue.append((value, depth + 1))
+            elif isinstance(current, list) and depth + 1 <= self._LABEL_SCAN_DEPTH:
+                for item in current:
+                    queue.append((item, depth + 1))
+        return candidates
+
+    @staticmethod
+    def _decompose_teams_from_labels(labels: List[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Return the first confident ``(home, away)`` split from candidate labels.
+
+        Uses only the structural invariants of
+        ``SafePayloadUtils.decompose_fixture_label`` (punctuation delimiters,
+        short connectors, bracket stripping, numeric-tail trimming); no
+        provider-specific vocabulary is involved.
+        """
+        for label in labels:
+            home, away = SafePayloadUtils.decompose_fixture_label(label)
+            if home and away:
+                return home, away
+        return None, None
+
+    def _infer_teams_from_outcomes(self, node: Any) -> Tuple[Optional[str], Optional[str]]:
+        """Backpropagate ``(home, away)`` from primary moneyline-style outcomes.
+
+        Considers mapped/lexicon-resolved market containers first; when the node
+        itself directly carries an outcome collection, the node is treated as a
+        single market. Only markets classified as canonical ``moneyline`` (or
+        unlabeled markets that directly host outcomes) participate, so spreads
+        and totals never contaminate the inference.
+        """
+        market_nodes: List[Any] = []
+        market_list = self._find_container(node, "market_container", self.market_list_terms)
+        if market_list:
+            market_nodes.extend(market_list)
+        if self._find_container(node, "outcome_container", self.outcome_list_terms):
+            market_nodes.append(node)
+        for market_node in market_nodes:
+            if not isinstance(market_node, dict):
+                continue
+            if not self._is_primary_moneyline_market(market_node):
+                continue
+            labels = self._collect_outcome_labels(market_node)
+            home, away = SafePayloadUtils.infer_competitors_from_outcomes(labels)
+            if home and away:
+                return home, away
+        return None, None
+
+    def _is_primary_moneyline_market(self, market_node: Dict[str, Any]) -> bool:
+        """True when the market is an unlabeled outcome host or classifies as moneyline."""
+        label = self.ctx.utils.coerce_str(
+            self._mapped_lookup(market_node, "market_label", self.market_label_terms)
+        )
+        if label is None:
+            return True
+        canonical_type, confidence = self.ctx.classifier.classify(label)
+        return canonical_type == CanonicalMarketType.MONEYLINE and confidence > 0.0
+
+    def _collect_outcome_labels(self, market_node: Dict[str, Any]) -> List[str]:
+        """Collect coerced outcome labels from a market's outcome collection."""
+        utils = self.ctx.utils
+        labels: List[str] = []
+        outcome_list = self._find_container(market_node, "outcome_container", self.outcome_list_terms) or []
+        for outcome_node in outcome_list:
+            if not isinstance(outcome_node, dict):
+                continue
+            label = utils.coerce_str(
+                self._mapped_lookup(outcome_node, "outcome_label", self.outcome_label_terms)
+            )
+            if label:
+                labels.append(label)
+        if not labels:
+            direct = utils.coerce_str(
+                self._mapped_lookup(market_node, "outcome_label", self.outcome_label_terms)
+            )
+            if direct:
+                labels.append(direct)
+        return labels
 
     def _mapped_lookup(self, node: Any, canonical_key: str, fallback_terms: Set[str]) -> Any:
         """Two-tier resolution: learned target mapping first, dynamic lexicon second.

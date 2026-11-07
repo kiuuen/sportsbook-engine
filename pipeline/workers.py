@@ -262,10 +262,10 @@ class PipelineWorkers:
     ) -> None:
         """Ingest a normalized event's markets into the state store.
 
-        On ``KeyError`` (the provider identity was never registered, e.g. a
-        detail payload for an event skipped by harvest), the event is resolved
-        against the cluster resolver, registered, and the ingest retried once.
-        All other failures are logged and swallowed.
+        The caller is responsible for registering the event first (see
+        :meth:`_ingest_normalized_events`); a ``KeyError`` here therefore
+        indicates a failed upstream registration and is logged, not retried.
+        All failures are logged and swallowed.
         """
         if self.store is None or not event.markets:
             return
@@ -274,42 +274,48 @@ class PipelineWorkers:
                 self.target_domain, native_event_id, event.markets
             )
         except KeyError:
-            canonical_id = self._resolve_canonical_id(event)
-            if not self._register_fixture_event(event, canonical_id):
-                logger.warning(
-                    f"[PipelineWorkers] Cannot ingest quotes for unregistered "
-                    f"event '{native_event_id}': registration failed."
-                )
-                return
-            try:
-                self.store.ingest_quotes(
-                    self.target_domain, native_event_id, event.markets
-                )
-            except Exception as err:
-                logger.warning(
-                    f"[PipelineWorkers] Quote ingest failed after late "
-                    f"registration for event '{native_event_id}': {err}"
-                )
+            logger.warning(
+                f"[PipelineWorkers] Cannot ingest quotes for event "
+                f"'{native_event_id}': provider identity not registered."
+            )
         except (TypeError, ValueError) as err:
             logger.warning(
                 f"[PipelineWorkers] Quote ingest rejected for event "
                 f"'{native_event_id}': {err}"
             )
 
-    def _process_harvest_events(self, events: List[CanonicalEvent]) -> None:
-        """Route normalized harvest fixtures through resolver and state store.
+    def _ingest_normalized_events(
+        self, events: List[CanonicalEvent], fallback_event_id: Optional[Any]
+    ) -> None:
+        """Resolve, register, and ingest a batch of normalized events into RAM.
 
-        For each event carrying a provider event id: resolve its canonical
-        cluster id, register it (with fixture metadata) in the store, and
-        ingest any markets already embedded in the harvest payload.
+        This is the single ingestion pipeline shared by the harvest and detail
+        loops. For each event: resolve its canonical cluster id via the
+        ``EventClusterResolver``, register/update it in the ``MarketStateStore``
+        with fixture metadata, then ingest all markets and decimal odds.
+
+        Args:
+            events: Normalized canonical events from a harvest or detail payload.
+            fallback_event_id: Provider event ID from the polling context (e.g.
+                the ID a detail endpoint was queried with). Used when an event
+                carries no native ``event_id`` (e.g. bulk catalog payloads).
         """
         for event in events:
-            if not event.event_id:
+            if self._shutdown_event.is_set():
+                break
+            native_id = (
+                str(event.event_id)
+                if event.event_id
+                else (str(fallback_event_id) if fallback_event_id is not None else "")
+            )
+            if not native_id:
+                logger.debug(
+                    "[PipelineWorkers] Skipping normalized event without any "
+                    "resolvable provider event ID."
+                )
                 continue
-            native_id = str(event.event_id)
             canonical_id = self._resolve_canonical_id(event)
-            if not self._register_fixture_event(event, canonical_id):
-                continue
+            self._register_fixture_event(event, canonical_id)
             self._ingest_event_markets(event, native_id)
 
     # ------------------------------------------------------------------ #
@@ -614,7 +620,7 @@ class PipelineWorkers:
                     )
                     self.update_active_entity_ids(key, executor, response)
                     events = self._normalize_response(response, f"harvest endpoint '{key}'")
-                    self._process_harvest_events(events)
+                    self._ingest_normalized_events(events, None)
                     new_ids = self.harvest_event_ids(executor, key, response)
                     self.healer.reset_backoff(key)
                     logger.info(
@@ -720,17 +726,7 @@ class PipelineWorkers:
                                 f"detail endpoint '{endpoint_key}' "
                                 f"(event={str(event_id) if event_id is not None else 'static'})",
                             )
-                            for event in events:
-                                if self._shutdown_event.is_set():
-                                    break
-                                native_id = (
-                                    str(event_id)
-                                    if event_id is not None
-                                    else (str(event.event_id) if event.event_id else "")
-                                )
-                                if not native_id:
-                                    continue
-                                self._ingest_event_markets(event, native_id)
+                            self._ingest_normalized_events(events, event_id)
                             self.healer.reset_backoff(endpoint_key)
                             self._endpoint_400_counts.pop(endpoint_key, None)
                             label = str(event_id) if event_id is not None else "static"

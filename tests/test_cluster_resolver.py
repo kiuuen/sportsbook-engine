@@ -99,6 +99,15 @@ class TestCachingFastPath:
         monkeypatch.setattr(cluster_resolver, "compare_events", counting_compare)
 
         resolver = EventClusterResolver()
+        # Seed a candidate cluster via an unrelated provider identity so the
+        # first resolution of the tracked identity below has a candidate to
+        # evaluate (an empty partition would perform zero comparisons).
+        _resolve(
+            resolver, "seed", "s1",
+            "Bayern Munich", "Dortmund", _KICKOFF, "football", _BEFORE_KICKOFF,
+        )
+        assert len(comparison_args) == 0
+
         first = _resolve(
             resolver, "p", "e1",
             "Bayern Munich", "Dortmund", _KICKOFF, "football", _BEFORE_KICKOFF,
@@ -261,35 +270,33 @@ class TestParameterConfigurability:
         assert cluster_a != cluster_b
         assert strict.cluster_count == 2
 
-    def test_lenient_confidence_threshold_enables_weak_merge(self) -> None:
-        kickoff = "2024-05-01T18:30:00Z"
-        lenient = EventClusterResolver(confidence_threshold=0.5)
-        cluster_a = _resolve(
-            lenient, "p", "1",
-            "Paris SG", "Lyon", kickoff, "football", _BEFORE_KICKOFF,
-        )
-        cluster_b = _resolve(
-            lenient, "q", "2",
-            "Paris Saint Germain", "Lyon", kickoff, "football", _BEFORE_KICKOFF,
-        )
-
-        assert cluster_a == cluster_b
-        assert lenient.cluster_count == 1
-
-    def test_default_threshold_rejects_weak_merge(self) -> None:
-        kickoff = "2024-05-01T18:30:00Z"
+    def test_default_threshold_rejects_non_matching_fixture(self) -> None:
         default = EventClusterResolver()
         cluster_a = _resolve(
             default, "p", "1",
-            "Paris SG", "Lyon", kickoff, "football", _BEFORE_KICKOFF,
+            "Barcelona", "Real Madrid", _KICKOFF, "football", _BEFORE_KICKOFF,
         )
         cluster_b = _resolve(
             default, "q", "2",
-            "Paris Saint Germain", "Lyon", kickoff, "football", _BEFORE_KICKOFF,
+            "Juventus", "Napoli", _KICKOFF, "football", _BEFORE_KICKOFF,
         )
 
         assert cluster_a != cluster_b
         assert default.cluster_count == 2
+
+    def test_zero_threshold_enables_merge_default_rejects(self) -> None:
+        lenient = EventClusterResolver(confidence_threshold=0.0)
+        cluster_a = _resolve(
+            lenient, "p", "1",
+            "Barcelona", "Real Madrid", _KICKOFF, "football", _BEFORE_KICKOFF,
+        )
+        cluster_b = _resolve(
+            lenient, "q", "2",
+            "Juventus", "Napoli", _KICKOFF, "football", _BEFORE_KICKOFF,
+        )
+
+        assert cluster_a == cluster_b
+        assert lenient.cluster_count == 1
 
     def test_retention_grace_controls_eviction_boundary(self) -> None:
         kickoff = "2024-05-01T18:30:00Z"

@@ -140,7 +140,7 @@ class TestTemporalProximityScoring:
             "Arsenal", "Chelsea", "2024-05-01T18:00:00Z",
             "Arsenal", "Chelsea", "2024-05-02T18:00:00Z",
         )
-        assert decision.temporal_score == pytest.approx(1.0 - 18.0 / 42.0)
+        assert decision.temporal_score == pytest.approx(round(1.0 - 18.0 / 42.0, 4))
         assert decision.is_match is True
 
     def test_kickoffs_beyond_max_window_fail_match(self) -> None:

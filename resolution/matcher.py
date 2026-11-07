@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 from difflib import SequenceMatcher
 
-from resolution.cleaner import extract_category_markers, normalize_team_name
+from resolution.cleaner import extract_qualifiers, normalize_text
 
 # Fixed, application-owned namespace (RFC 4122 "random" reserved slot).
 # This constant must never change, or previously issued canonical IDs
@@ -119,8 +119,8 @@ def generate_canonical_event_id(
         ValueError: If both team names normalize to empty strings, since
             an event without any team identity cannot be resolved safely.
     """
-    normalized_home = normalize_team_name(home_team)
-    normalized_away = normalize_team_name(away_team)
+    normalized_home = normalize_text(home_team)
+    normalized_away = normalize_text(away_team)
 
     if not normalized_home and not normalized_away:
         raise ValueError(
@@ -250,8 +250,8 @@ def compare_events(
          with temporal proximity; unknown timestamps reduce confidence
          but do not veto.
     """
-    norm_home_a, norm_away_a = normalize_team_name(home_a), normalize_team_name(away_a)
-    norm_home_b, norm_away_b = normalize_team_name(home_b), normalize_team_name(away_b)
+    norm_home_a, norm_away_a = normalize_text(home_a), normalize_text(away_a)
+    norm_home_b, norm_away_b = normalize_text(home_b), normalize_text(away_b)
 
     if not (norm_home_a or norm_away_a) or not (norm_home_b or norm_away_b):
         return MatchDecision(
@@ -263,8 +263,8 @@ def compare_events(
             reason="insufficient team identity on at least one side",
         )
 
-    markers_a = extract_category_markers(home_a) | extract_category_markers(away_a)
-    markers_b = extract_category_markers(home_b) | extract_category_markers(away_b)
+    markers_a = extract_qualifiers(home_a) | extract_qualifiers(away_a)
+    markers_b = extract_qualifiers(home_b) | extract_qualifiers(away_b)
     similarity = _name_alignment_score(
         norm_home_a, norm_away_a, norm_home_b, norm_away_b
     )

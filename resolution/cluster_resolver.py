@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from resolution.cleaner import normalize_team_name
+from resolution.cleaner import normalize_text
 from resolution.matcher import (
     compare_events,
     generate_canonical_event_id,
@@ -450,7 +450,7 @@ class EventClusterResolver:
 def normalize_or_empty(name: Optional[str]) -> str:
     """Normalize a team name, degrading to an empty string on failure."""
     try:
-        return normalize_team_name(name)
+        return normalize_text(name)
     except (TypeError, ValueError):
         return ""
 

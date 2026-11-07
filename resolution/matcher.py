@@ -151,19 +151,38 @@ class MatchDecision:
     category_conflict: bool
     reason: str
 
+def _singular_forms(token: str) -> Tuple[str, ...]:
+    """Yield the token plus naive plural-stripped variants.
+
+    Purely algorithmic morphology: strips a trailing ``es`` or ``s`` so
+    pluralized abbreviations ("wolves") can prefix-match their root
+    ("wolverhampton") without any static vocabulary.
+    """
+    forms = [token]
+    if token.endswith("es") and len(token) > 2:
+        forms.append(token[:-2])
+    if token.endswith("s") and len(token) > 1:
+        forms.append(token[:-1])
+    return tuple(forms)
+
+
 def _tokens_match(a: str, b: str) -> bool:
     """Decide whether two tokens represent the same word.
 
     Accepts exact equality, a shared prefix of at least three characters
-    (covers truncated forms such as "man" / "manchester"), and minor
-    spelling differences via SequenceMatcher ratio.
+    (covers truncated forms such as "man" / "manchester"), plural-stripped
+    root prefixes ("wolves" / "wolverhampton"), single-letter name initials
+    ("n" / "novak"), and minor spelling differences via SequenceMatcher.
     """
     if a == b:
         return True
-    if len(a) >= 3 and len(b) >= 3 and (a.startswith(b) or b.startswith(a)):
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) == 1 and longer.startswith(shorter):
         return True
+    for form in _singular_forms(shorter):
+        if len(form) >= 3 and longer.startswith(form):
+            return True
     return SequenceMatcher(None, a, b).ratio() >= _TOKEN_FUZZY_THRESHOLD
-
 
 def _token_similarity(a: str, b: str) -> float:
     """Fuzzy Jaccard similarity between the tokens of two normalized names.

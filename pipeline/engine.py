@@ -16,7 +16,9 @@ from typing import List, Optional
 from database_manager import DatabaseManager
 from pipeline.healing import FailureHealer
 from pipeline.workers import PipelineWorkers
+from resolution import EventClusterResolver
 from session_manager import SessionManager
+from state import MarketStateStore
 from streaming_executor import StreamingExecutor
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,12 @@ class PipelineEngine:
         max_backoff: Maximum backoff delay in seconds.
         request_timeout: Per-request/per-probe timeout in seconds guarding
             against hung network calls.
+        maintenance_interval: Seconds between state-store/cluster-resolver
+            eviction cycles.
+        store: Optional shared market state store; when omitted, workers
+            build a standalone default instance.
+        resolver: Optional shared event cluster resolver; when omitted,
+            workers build a standalone default instance.
     """
 
     def __init__(
@@ -60,6 +68,9 @@ class PipelineEngine:
         base_backoff: float = 2.0,
         max_backoff: float = 60.0,
         request_timeout: float = 30.0,
+        maintenance_interval: float = 300.0,
+        store: Optional[MarketStateStore] = None,
+        resolver: Optional[EventClusterResolver] = None,
     ) -> None:
         self.target_domain = target_domain
         self.db_manager = db_manager if db_manager else DatabaseManager()
@@ -77,6 +88,7 @@ class PipelineEngine:
             base_backoff=base_backoff,
             max_backoff=max_backoff,
         )
+        self.maintenance_interval = max(float(maintenance_interval), 1.0)
         self.workers = PipelineWorkers(
             target_domain=target_domain,
             db_manager=self.db_manager,
@@ -85,8 +97,26 @@ class PipelineEngine:
             harvest_interval=harvest_interval,
             detail_poll_interval=detail_poll_interval,
             request_timeout=request_timeout,
+            store=store,
+            resolver=resolver,
         )
         self._tasks: List["asyncio.Task"] = []
+
+    # ------------------------------------------------------------------ #
+    # Shared state access
+    # ------------------------------------------------------------------ #
+
+    @property
+    def store(self) -> Optional[MarketStateStore]:
+        """The market state store used by the workers (may be None on
+        fallback-initialization failure)."""
+        return self.workers.store
+
+    @property
+    def resolver(self) -> Optional[EventClusterResolver]:
+        """The event cluster resolver used by the workers (may be None on
+        fallback-initialization failure)."""
+        return self.workers.resolver
 
     # ------------------------------------------------------------------ #
     # Lifecycle management
@@ -101,8 +131,40 @@ class PipelineEngine:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
+    async def _maintenance_loop(self) -> None:
+        """Periodically evict stale entries from the state store and resolver.
+
+        Sleeps cooperatively via the healer (shutdown-aware) and terminates
+        immediately when the shutdown event is set. Each eviction call is
+        individually guarded so a failure in one component never prevents the
+        other from being maintained.
+        """
+        while not self._shutdown_event.is_set():
+            await self.healer.sleep_or_shutdown(self.maintenance_interval)
+            if self._shutdown_event.is_set():
+                break
+            if self.workers.store is not None:
+                try:
+                    self.workers.store.evict()
+                except Exception as err:
+                    logger.warning(
+                        f"[PipelineEngine] State store eviction failed: {err}"
+                    )
+            if self.workers.resolver is not None:
+                try:
+                    self.workers.resolver.evict()
+                except Exception as err:
+                    logger.warning(
+                        f"[PipelineEngine] Cluster resolver eviction failed: {err}"
+                    )
+
     async def _run_pipeline(self) -> None:
         """Launch harvest and detail worker tasks and wait for shutdown."""
+        maintenance_task = asyncio.create_task(
+            self._maintenance_loop(), name="maintenance"
+        )
+        self._tasks.append(maintenance_task)
+
         executor = self.workers.build_replay_executor()
         harvest_keys, detail_keys = self.workers.classify_endpoints(executor)
 
@@ -146,16 +208,24 @@ class PipelineEngine:
         await self._shutdown_event.wait()
         await self._cancel_tasks()
 
-    async def start(self) -> None:
-        """Start the autonomous ingestion pipeline and block until shutdown."""
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, self._handle_shutdown)
-            except (NotImplementedError, RuntimeError) as err:
-                logger.debug(
-                    f"[PipelineEngine] Signal handler for {sig} unavailable: {err}"
-                )
+    async def start(self, register_signals: bool = True) -> None:
+        """Start the autonomous ingestion pipeline and block until shutdown.
+
+        Args:
+            register_signals: When True (default), SIGINT/SIGTERM handlers are
+                registered on the running loop. Set to False when a top-level
+                multi-target supervisor owns process signal management, to
+                avoid handler collisions.
+        """
+        if register_signals:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, self._handle_shutdown)
+                except (NotImplementedError, RuntimeError) as err:
+                    logger.debug(
+                        f"[PipelineEngine] Signal handler for {sig} unavailable: {err}"
+                    )
 
         logger.info(
             f"[PipelineEngine] Starting autonomous ingestion pipeline for "

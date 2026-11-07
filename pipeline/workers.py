@@ -16,6 +16,8 @@ from pipeline.healing import FailureHealer
 from replay_executor import ReplayExecutor
 from streaming_executor import StreamingExecutor
 from odds_normalizer import CanonicalEvent, OddsNormalizer
+from resolution import EventClusterResolver
+from state import MarketStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,10 @@ class PipelineWorkers:
         harvest_interval: Seconds between event-ID harvesting cycles.
         detail_poll_interval: Base seconds between detail polling cycles.
         request_timeout: Per-request/per-probe timeout in seconds.
+        store: Shared market state store; a standalone default instance is
+            created when omitted.
+        resolver: Shared event cluster resolver; a standalone default instance
+            is created when omitted.
     """
 
     def __init__(
@@ -72,6 +78,8 @@ class PipelineWorkers:
         harvest_interval: float = 60.0,
         detail_poll_interval: float = 5.0,
         request_timeout: float = 30.0,
+        store: Optional[MarketStateStore] = None,
+        resolver: Optional[EventClusterResolver] = None,
     ) -> None:
         self.target_domain = target_domain
         self.db_manager = db_manager
@@ -83,6 +91,28 @@ class PipelineWorkers:
         self._active_entity_ids: Dict[str, Set[Any]] = {}
         self._endpoint_400_counts: Dict[str, int] = {}
         self._quarantined_endpoints: Set[str] = set()
+        if store is not None:
+            self.store: Optional[MarketStateStore] = store
+        else:
+            try:
+                self.store = MarketStateStore()
+            except Exception as err:
+                logger.error(
+                    f"[PipelineWorkers] Failed to initialize fallback "
+                    f"MarketStateStore for '{self.target_domain}': {err}"
+                )
+                self.store = None
+        if resolver is not None:
+            self.resolver: Optional[EventClusterResolver] = resolver
+        else:
+            try:
+                self.resolver = EventClusterResolver()
+            except Exception as err:
+                logger.error(
+                    f"[PipelineWorkers] Failed to initialize fallback "
+                    f"EventClusterResolver for '{self.target_domain}': {err}"
+                )
+                self.resolver = None
         try:
             self.normalizer = OddsNormalizer()
         except Exception as err:
@@ -138,21 +168,24 @@ class PipelineWorkers:
             )
             return None
 
-    def _normalize_response(self, response: Any, context_label: str) -> None:
-        """Normalize a raw API response and log the canonical extraction yield.
+    def _normalize_response(
+        self, response: Any, context_label: str
+    ) -> List[CanonicalEvent]:
+        """Normalize a raw API response, log the canonical yield, and return
+        the normalized events for downstream routing.
 
-        Normalization failures are logged and swallowed so they never crash
-        the worker loops.
+        Returns an empty list when the normalizer is unavailable or
+        normalization fails, so worker loops never crash on malformed payloads.
         """
         if self.normalizer is None:
-            return
+            return []
         try:
             events: List[CanonicalEvent] = self.normalizer.normalize(response)
         except Exception as err:
             logger.warning(
                 f"[PipelineWorkers] Normalization failed for {context_label}: {err}"
             )
-            return
+            return []
         market_count = sum(len(event.markets) for event in events)
         odds_count = sum(
             1
@@ -166,6 +199,118 @@ class PipelineWorkers:
             f"{len(events)} event(s), {market_count} market(s), "
             f"{odds_count} decimal odds value(s)."
         )
+        return events
+
+    def _resolve_canonical_id(self, event: CanonicalEvent) -> Optional[str]:
+        """Resolve the canonical cluster id for a normalized fixture event.
+
+        Returns ``None`` when no resolver is available or resolution fails
+        (e.g. both team names empty after normalization); the caller then
+        registers the event without a canonical id, letting the store mint one.
+        """
+        if self.resolver is None:
+            return None
+        native_id = str(event.event_id)
+        try:
+            return self.resolver.resolve(
+                self.target_domain,
+                native_id,
+                event.home_team,
+                event.away_team,
+                event.start_time,
+                event.sport,
+            )
+        except (TypeError, ValueError) as err:
+            logger.warning(
+                f"[PipelineWorkers] Cluster resolution failed for event "
+                f"'{native_id}': {err}"
+            )
+            return None
+
+    def _register_fixture_event(
+        self, event: CanonicalEvent, canonical_id: Optional[str]
+    ) -> bool:
+        """Register a normalized fixture event in the state store.
+
+        Returns True on success; failures are logged and swallowed so a single
+        malformed fixture never disrupts the worker loop.
+        """
+        if self.store is None:
+            return False
+        native_id = str(event.event_id)
+        try:
+            self.store.register_event(
+                self.target_domain,
+                native_id,
+                event_id=canonical_id,
+                home_team=event.home_team,
+                away_team=event.away_team,
+                start_time=event.start_time,
+                league=event.league,
+                sport=event.sport,
+            )
+            return True
+        except (TypeError, ValueError) as err:
+            logger.warning(
+                f"[PipelineWorkers] Store registration failed for event "
+                f"'{native_id}' (canonical={canonical_id!r}): {err}"
+            )
+            return False
+
+    def _ingest_event_markets(
+        self, event: CanonicalEvent, native_event_id: str
+    ) -> None:
+        """Ingest a normalized event's markets into the state store.
+
+        On ``KeyError`` (the provider identity was never registered, e.g. a
+        detail payload for an event skipped by harvest), the event is resolved
+        against the cluster resolver, registered, and the ingest retried once.
+        All other failures are logged and swallowed.
+        """
+        if self.store is None or not event.markets:
+            return
+        try:
+            self.store.ingest_quotes(
+                self.target_domain, native_event_id, event.markets
+            )
+        except KeyError:
+            canonical_id = self._resolve_canonical_id(event)
+            if not self._register_fixture_event(event, canonical_id):
+                logger.warning(
+                    f"[PipelineWorkers] Cannot ingest quotes for unregistered "
+                    f"event '{native_event_id}': registration failed."
+                )
+                return
+            try:
+                self.store.ingest_quotes(
+                    self.target_domain, native_event_id, event.markets
+                )
+            except Exception as err:
+                logger.warning(
+                    f"[PipelineWorkers] Quote ingest failed after late "
+                    f"registration for event '{native_event_id}': {err}"
+                )
+        except (TypeError, ValueError) as err:
+            logger.warning(
+                f"[PipelineWorkers] Quote ingest rejected for event "
+                f"'{native_event_id}': {err}"
+            )
+
+    def _process_harvest_events(self, events: List[CanonicalEvent]) -> None:
+        """Route normalized harvest fixtures through resolver and state store.
+
+        For each event carrying a provider event id: resolve its canonical
+        cluster id, register it (with fixture metadata) in the store, and
+        ingest any markets already embedded in the harvest payload.
+        """
+        for event in events:
+            if not event.event_id:
+                continue
+            native_id = str(event.event_id)
+            canonical_id = self._resolve_canonical_id(event)
+            if not self._register_fixture_event(event, canonical_id):
+                continue
+            self._ingest_event_markets(event, native_id)
 
     # ------------------------------------------------------------------ #
     # Entity harvesting and parameter mapping
@@ -468,7 +613,8 @@ class PipelineWorkers:
                         timeout=self.request_timeout,
                     )
                     self.update_active_entity_ids(key, executor, response)
-                    self._normalize_response(response, f"harvest endpoint '{key}'")
+                    events = self._normalize_response(response, f"harvest endpoint '{key}'")
+                    self._process_harvest_events(events)
                     new_ids = self.harvest_event_ids(executor, key, response)
                     self.healer.reset_backoff(key)
                     logger.info(
@@ -569,11 +715,22 @@ class PipelineWorkers:
                                 timeout=self.request_timeout,
                             )
                             self.update_active_entity_ids(endpoint_key, executor, response)
-                            self._normalize_response(
+                            events = self._normalize_response(
                                 response,
                                 f"detail endpoint '{endpoint_key}' "
                                 f"(event={str(event_id) if event_id is not None else 'static'})",
                             )
+                            for event in events:
+                                if self._shutdown_event.is_set():
+                                    break
+                                native_id = (
+                                    str(event_id)
+                                    if event_id is not None
+                                    else (str(event.event_id) if event.event_id else "")
+                                )
+                                if not native_id:
+                                    continue
+                                self._ingest_event_markets(event, native_id)
                             self.healer.reset_backoff(endpoint_key)
                             self._endpoint_400_counts.pop(endpoint_key, None)
                             label = str(event_id) if event_id is not None else "static"

@@ -102,6 +102,7 @@ class MultiTargetOrchestrator:
         self._engine_tasks: Dict[str, "asyncio.Task"] = {}
         self._status_task: Optional["asyncio.Task"] = None
         self._shutdown_event = asyncio.Event()
+        self._shutdown_started: bool = False
 
     # ------------------------------------------------------------------ #
     # Target discovery
@@ -259,6 +260,13 @@ class MultiTargetOrchestrator:
         requests complete), their tasks are awaited, and the orchestrator's
         own discovery database connection is closed when it owns it.
         """
+        if self._shutdown_started:
+            logger.debug(
+                "[Orchestrator] shutdown() already in progress or completed; "
+                "ignoring repeated call."
+            )
+            return
+        self._shutdown_started = True
         self._shutdown_event.set()
         if self._status_task is not None and not self._status_task.done():
             self._status_task.cancel()

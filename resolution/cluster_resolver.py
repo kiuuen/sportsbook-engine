@@ -1,16 +1,18 @@
-"""In-memory active entity resolution for provider fixtures.
+"""In-memory active entity cluster manager for provider fixtures.
 
 Maintains a bounded catalog of active canonical event clusters and resolves
 incoming provider fixtures to cluster identifiers. Previously resolved
-fixtures are served from an O(1) cache; new fixtures are compared only
-against a date/sport-partitioned candidate set using the deterministic
-scoring logic from :mod:`resolution.matcher`, never against the full
-catalog. Eviction purges concluded or expired clusters together with all
-of their lookup entries so memory usage stays bounded.
+provider identities are served from an O(1) cache; new fixtures are compared
+only against a sport/date-partitioned candidate set using the deterministic
+scoring logic from :mod:`resolution.matcher`, never against the full catalog.
+Eviction purges clusters whose scheduled kickoff plus a configurable grace
+period has passed, together with all of their reverse lookup entries.
+
+All operations are strictly synchronous and intended to run on the main
+asyncio event loop; no internal locking or background tasks are used.
 """
 
 import datetime
-import hashlib
 import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -24,7 +26,10 @@ from resolution.matcher import (
 
 _UNKNOWN_BUCKET = ""
 
-# Bucket key type: (calendar date "YYYY-MM-DD" or "" when unknown, sport or "").
+# Provider identity: (provider_domain, provider_event_id), both normalized.
+_ProviderIdentity = Tuple[str, str]
+
+# Bucket key: (calendar date "YYYY-MM-DD" or "" when unknown, sport or "").
 _BucketKey = Tuple[str, str]
 
 
@@ -39,22 +44,22 @@ class EventCluster:
     sport: Optional[str]
     created_at: datetime.datetime
     last_seen_at: datetime.datetime
-    fixture_keys: Set[str] = field(default_factory=set)
+    provider_identities: Set[_ProviderIdentity] = field(default_factory=set)
 
 
 class EventClusterResolver:
     """Resolves provider fixtures to canonical cluster identifiers.
 
     Args:
-        name_match_threshold: Minimum aligned name-token similarity required
-            to accept a candidate cluster (mirrors the matcher's scale).
-        temporal_match_window_hours: Configurable mirror of the matcher's
-            full-proximity window; used for documentation and index probing.
+        confidence_threshold: Minimum combined confidence from
+            :func:`resolution.matcher.compare_events` required to attach a
+            fixture to an existing cluster.
+        temporal_match_window_hours: Full-proximity window mirrored from the
+            matcher; drives the date-bucket probe radius.
         temporal_max_window_hours: Maximum temporal separation still eligible
             for matching; drives the date-bucket probe radius.
-        cluster_ttl_hours: Clusters not touched within this window, or whose
-            start time lies further in the past, are purged by
-            :meth:`evict_expired`.
+        retention_grace_hours: Clusters whose parsed kickoff lies further in
+            the past than this grace period are purged by :meth:`evict`.
         max_active_clusters: Hard memory bound; the least-recently-seen
             clusters are evicted when the bound would be exceeded.
         max_candidates_per_resolution: Upper bound on comparisons performed
@@ -66,47 +71,47 @@ class EventClusterResolver:
 
     def __init__(
         self,
-        name_match_threshold: float = 0.5,
+        confidence_threshold: float = 0.6,
         temporal_match_window_hours: float = 6.0,
         temporal_max_window_hours: float = 48.0,
-        cluster_ttl_hours: float = 72.0,
+        retention_grace_hours: float = 6.0,
         max_active_clusters: int = 10000,
         max_candidates_per_resolution: int = 64,
     ) -> None:
-        if not 0.0 <= name_match_threshold <= 1.0:
-            raise ValueError("name_match_threshold must be within [0, 1].")
+        if not 0.0 <= confidence_threshold <= 1.0:
+            raise ValueError("confidence_threshold must be within [0, 1].")
         if temporal_match_window_hours <= 0.0:
             raise ValueError("temporal_match_window_hours must be positive.")
         if temporal_max_window_hours < temporal_match_window_hours:
             raise ValueError(
                 "temporal_max_window_hours must be >= temporal_match_window_hours."
             )
-        if cluster_ttl_hours <= 0.0:
-            raise ValueError("cluster_ttl_hours must be positive.")
+        if retention_grace_hours < 0.0:
+            raise ValueError("retention_grace_hours must be non-negative.")
         if max_active_clusters < 1:
             raise ValueError("max_active_clusters must be at least 1.")
         if max_candidates_per_resolution < 1:
             raise ValueError("max_candidates_per_resolution must be at least 1.")
 
-        self._name_match_threshold = float(name_match_threshold)
+        self._confidence_threshold = float(confidence_threshold)
         self._temporal_match_window_hours = float(temporal_match_window_hours)
         self._temporal_max_window_hours = float(temporal_max_window_hours)
-        self._cluster_ttl_seconds = float(cluster_ttl_hours) * 3600.0
+        self._retention_grace_seconds = float(retention_grace_hours) * 3600.0
         self._max_active_clusters = int(max_active_clusters)
         self._max_candidates = int(max_candidates_per_resolution)
 
         self._clusters: Dict[str, EventCluster] = {}
-        self._fixture_to_cluster: Dict[str, str] = {}
+        self._provider_to_cluster: Dict[_ProviderIdentity, str] = {}
         self._index: Dict[_BucketKey, Set[str]] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
 
-    def resolve_fixture(
+    def resolve(
         self,
-        provider: Optional[str],
-        fixture_id: Optional[str],
+        provider_domain: Optional[str],
+        provider_event_id: Optional[str],
         home_team: Optional[str],
         away_team: Optional[str],
         start_time: Optional[str],
@@ -115,13 +120,15 @@ class EventClusterResolver:
     ) -> str:
         """Resolve a provider fixture to a canonical cluster identifier.
 
-        Previously resolved fixture identities return their cluster in O(1).
-        Otherwise the fixture is compared against indexed candidate clusters
-        only; a satisfying candidate wins, else a new cluster is created.
+        Fast path: a known ``(provider_domain, provider_event_id)`` identity
+        returns its cluster in O(1). Search path: the fixture is compared
+        against indexed candidate clusters only; the first candidate whose
+        decision confidence meets the configured threshold wins, else a new
+        cluster is created from the deterministic canonical ID.
 
         Args:
-            provider: Provider identifier (used for the fast-lookup key).
-            fixture_id: Provider-specific fixture identifier, if available.
+            provider_domain: Provider identifier (e.g. feed/target name).
+            provider_event_id: Provider-specific event identifier.
             home_team: Raw home team name from the feed.
             away_team: Raw away team name from the feed.
             start_time: Raw start timestamp from the feed.
@@ -132,8 +139,10 @@ class EventClusterResolver:
             The canonical cluster identifier.
 
         Raises:
-            ValueError: If both team names are empty after normalization.
+            ValueError: If the provider identity is incomplete or both team
+                names are empty after normalization.
         """
+        identity = self._normalize_identity(provider_domain, provider_event_id)
         if not (normalize_or_empty(home_team) or normalize_or_empty(away_team)):
             raise ValueError(
                 "Cannot resolve fixture: both team names are empty after "
@@ -141,18 +150,15 @@ class EventClusterResolver:
             )
 
         current_time = now if now is not None else _utc_now()
-        fixture_key = self._fixture_key(
-            provider, fixture_id, home_team, away_team, start_time, sport
-        )
 
-        cached_cluster_id = self._fixture_to_cluster.get(fixture_key)
+        cached_cluster_id = self._provider_to_cluster.get(identity)
         if cached_cluster_id is not None:
             cluster = self._clusters.get(cached_cluster_id)
             if cluster is not None:
                 cluster.last_seen_at = current_time
                 return cached_cluster_id
             # Stale pointer to an evicted cluster; fall through to re-resolution.
-            self._fixture_to_cluster.pop(fixture_key, None)
+            self._provider_to_cluster.pop(identity, None)
 
         matched_cluster_id = self._find_matching_cluster(
             home_team, away_team, start_time, sport
@@ -162,24 +168,15 @@ class EventClusterResolver:
                 home_team, away_team, start_time, sport, current_time
             )
 
-        self._attach(matched_cluster_id, fixture_key, current_time)
+        self._attach(matched_cluster_id, identity, current_time)
         return matched_cluster_id
 
-    def conclude_cluster(self, cluster_id: str) -> bool:
-        """Purge a concluded cluster and all of its lookup entries.
+    def evict(self, now: Optional[datetime.datetime] = None) -> int:
+        """Purge clusters whose kickoff plus the retention grace has passed.
 
-        Returns:
-            ``True`` when the cluster existed and was removed.
-        """
-        return self._detach(cluster_id)
-
-    def evict_expired(
-        self, now: Optional[datetime.datetime] = None
-    ) -> int:
-        """Purge expired clusters and their lookup entries.
-
-        A cluster is expired when it has not been touched within the TTL or
-        when its parsed start time lies further in the past than the TTL.
+        Clusters with an unparseable or absent kickoff time are retained by
+        this method (they carry no schedulable ground truth); capacity
+        enforcement still bounds their count.
 
         Returns:
             The number of clusters evicted.
@@ -188,7 +185,7 @@ class EventClusterResolver:
         expired_ids = [
             cluster_id
             for cluster_id, cluster in self._clusters.items()
-            if self._is_expired(cluster, current_time)
+            if self._is_past_retention(cluster, current_time)
         ]
         for cluster_id in expired_ids:
             self._detach(cluster_id)
@@ -207,13 +204,15 @@ class EventClusterResolver:
             sport=cluster.sport,
             created_at=cluster.created_at,
             last_seen_at=cluster.last_seen_at,
-            fixture_keys=set(cluster.fixture_keys),
+            provider_identities=set(cluster.provider_identities),
         )
 
-    def fixtures_for_cluster(self, cluster_id: str) -> Tuple[str, ...]:
-        """Return the provider fixture keys currently bound to a cluster."""
+    def provider_identities_for_cluster(
+        self, cluster_id: str
+    ) -> Tuple[_ProviderIdentity, ...]:
+        """Return the provider identities currently bound to a cluster."""
         cluster = self._clusters.get(cluster_id)
-        return tuple(sorted(cluster.fixture_keys)) if cluster else ()
+        return tuple(sorted(cluster.provider_identities)) if cluster else ()
 
     @property
     def cluster_count(self) -> int:
@@ -224,6 +223,20 @@ class EventClusterResolver:
     # Internal helpers
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _normalize_identity(
+        provider_domain: Optional[str], provider_event_id: Optional[str]
+    ) -> _ProviderIdentity:
+        """Validate and normalize a provider identity pair."""
+        domain = str(provider_domain).strip() if provider_domain is not None else ""
+        event_id = str(provider_event_id).strip() if provider_event_id is not None else ""
+        if not domain or not event_id:
+            raise ValueError(
+                "Cannot resolve fixture: both provider_domain and "
+                "provider_event_id are required."
+            )
+        return (domain, event_id)
+
     def _find_matching_cluster(
         self,
         home_team: Optional[str],
@@ -231,7 +244,7 @@ class EventClusterResolver:
         start_time: Optional[str],
         sport: Optional[str],
     ) -> Optional[str]:
-        """Return the best-scoring satisfying candidate cluster, if any."""
+        """Return the best-scoring qualifying candidate cluster, if any."""
         date_bucket = self._date_bucket(start_time)
         sport_bucket = self._sport_bucket(sport)
 
@@ -246,20 +259,22 @@ class EventClusterResolver:
             if cluster is None:
                 continue
             comparisons += 1
-            decision = compare_events(
-                home_team,
-                away_team,
-                start_time,
-                cluster.home_team,
-                cluster.away_team,
-                cluster.start_time,
-                sport,
-                cluster.sport,
-            )
+            try:
+                decision = compare_events(
+                    home_team,
+                    away_team,
+                    start_time,
+                    cluster.home_team,
+                    cluster.away_team,
+                    cluster.start_time,
+                    sport,
+                    cluster.sport,
+                )
+            except (TypeError, ValueError):
+                continue
             if (
-                not decision.is_match
-                or decision.category_conflict
-                or decision.name_similarity < self._name_match_threshold
+                decision.category_conflict
+                or decision.confidence < self._confidence_threshold
                 or (
                     decision.temporal_score is not None
                     and decision.temporal_score <= 0.0
@@ -370,26 +385,29 @@ class EventClusterResolver:
     def _attach(
         self,
         cluster_id: str,
-        fixture_key: str,
+        identity: _ProviderIdentity,
         current_time: datetime.datetime,
     ) -> None:
-        """Bind a fixture key to a cluster bidirectionally."""
+        """Bind a provider identity to a cluster bidirectionally."""
         cluster = self._clusters.get(cluster_id)
         if cluster is None:
             raise KeyError(f"Unknown cluster id: {cluster_id}")
-        cluster.fixture_keys.add(fixture_key)
+        cluster.provider_identities.add(identity)
         cluster.last_seen_at = current_time
-        self._fixture_to_cluster[fixture_key] = cluster_id
+        self._provider_to_cluster[identity] = cluster_id
 
     def _detach(self, cluster_id: str) -> bool:
-        """Remove a cluster, its index entries, and its fixture bindings."""
+        """Remove a cluster, its index entries, and its provider bindings."""
         cluster = self._clusters.pop(cluster_id, None)
         if cluster is None:
             return False
-        for fixture_key in cluster.fixture_keys:
-            if self._fixture_to_cluster.get(fixture_key) == cluster_id:
-                self._fixture_to_cluster.pop(fixture_key, None)
-        bucket = (self._date_bucket(cluster.start_time), self._sport_bucket(cluster.sport))
+        for identity in cluster.provider_identities:
+            if self._provider_to_cluster.get(identity) == cluster_id:
+                self._provider_to_cluster.pop(identity, None)
+        bucket = (
+            self._date_bucket(cluster.start_time),
+            self._sport_bucket(cluster.sport),
+        )
         bucket_ids = self._index.get(bucket)
         if bucket_ids is not None:
             bucket_ids.discard(cluster_id)
@@ -397,43 +415,16 @@ class EventClusterResolver:
                 self._index.pop(bucket, None)
         return True
 
-    def _is_expired(
+    def _is_past_retention(
         self, cluster: EventCluster, current_time: datetime.datetime
     ) -> bool:
-        """Decide whether a cluster has exceeded its TTL."""
-        if (current_time - cluster.last_seen_at).total_seconds() > self._cluster_ttl_seconds:
-            return True
+        """Decide whether a cluster's kickoff plus grace period has passed."""
         parsed_start = parse_start_time_utc(cluster.start_time)
+        if parsed_start is None:
+            return False
         return (
-            parsed_start is not None
-            and (current_time - parsed_start).total_seconds() > self._cluster_ttl_seconds
-        )
-
-    @staticmethod
-    def _fixture_key(
-        provider: Optional[str],
-        fixture_id: Optional[str],
-        home_team: Optional[str],
-        away_team: Optional[str],
-        start_time: Optional[str],
-        sport: Optional[str],
-    ) -> str:
-        """Build the O(1) lookup key for a provider fixture.
-
-        Uses ``provider::fixture_id`` when both are available; otherwise
-        derives a deterministic content hash from the raw fields.
-        """
-        provider_text = str(provider).strip() if provider is not None else ""
-        fixture_text = str(fixture_id).strip() if fixture_id is not None else ""
-        if provider_text and fixture_text:
-            return f"{provider_text}::{fixture_text}"
-
-        content = "|".join(
-            "" if value is None else str(value)
-            for value in (provider, fixture_id, home_team, away_team, start_time, sport)
-        )
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return f"content::{digest}"
+            current_time - parsed_start
+        ).total_seconds() > self._retention_grace_seconds
 
     @staticmethod
     def _sport_bucket(sport: Optional[str]) -> str:

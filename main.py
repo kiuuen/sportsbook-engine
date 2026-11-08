@@ -70,12 +70,22 @@ def _format_sample_line(
 ) -> str:
     """Render one compact sample line of converged odds from live snapshots.
 
-    Prefers the first multi-book converged event so the monitor showcases
-    cross-provider agreement; falls back to the first available event.
+    Prefers events that hold ingested markets so the monitor showcases live
+    odds data; among those, multi-book converged events are favored first,
+    then any event with markets. Falls back to general events only when no
+    event in memory possesses markets.
     """
     if not snapshots:
         return "no live events held in memory"
-    sample = next((s for s in snapshots if len(s.providers) > 1), snapshots[0])
+
+    with_markets = [s for s in snapshots if s.markets]
+    if with_markets:
+        candidates = with_markets
+    else:
+        candidates = list(snapshots)
+    sample = next(
+        (s for s in candidates if len(s.providers) > 1), candidates[0]
+    )
 
     teams = " vs ".join(
         team for team in (sample.home_team, sample.away_team) if team

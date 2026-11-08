@@ -19,6 +19,7 @@ Responsibilities
 """
 
 import asyncio
+import json
 import logging
 import pathlib
 import signal
@@ -33,7 +34,7 @@ from state import EventSnapshot, MarketStateStore
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB_PATH = pathlib.Path("./data/control_plane.db")
-
+_DEFAULT_SCHEMA_DIR = pathlib.Path("./data/schemas")
 
 class MultiTargetOrchestrator:
     """Supervises concurrent :class:`PipelineEngine` instances for many targets.
@@ -52,6 +53,9 @@ class MultiTargetOrchestrator:
             converges data into the same memory space.
         resolver: Optional shared :class:`~resolution.EventClusterResolver`.
             When omitted, a shared default instance is created.
+        schema_dir: Optional directory containing JSON schema files that are
+            synced into the control-plane database on every start(). When
+            omitted, ``./data/schemas/`` is used.
     """
 
     def __init__(
@@ -60,6 +64,7 @@ class MultiTargetOrchestrator:
         db_manager: Optional[DatabaseManager] = None,
         store: Optional[MarketStateStore] = None,
         resolver: Optional[EventClusterResolver] = None,
+        schema_dir: Optional[pathlib.Path] = None,
     ) -> None:
         explicit: List[str] = []
         for domain in target_domains or []:
@@ -72,6 +77,9 @@ class MultiTargetOrchestrator:
         self._external_db_manager: Optional[DatabaseManager] = db_manager
         self._db_path: pathlib.Path = (
             pathlib.Path(db_manager.db_path) if db_manager is not None else _DEFAULT_DB_PATH
+        )
+        self._schema_dir: pathlib.Path = (
+            pathlib.Path(schema_dir) if schema_dir is not None else _DEFAULT_SCHEMA_DIR
         )
 
         if store is not None:
@@ -134,6 +142,80 @@ class MultiTargetOrchestrator:
     # ------------------------------------------------------------------ #
     # Target discovery
     # ------------------------------------------------------------------ #
+
+    def _sync_schema_files(self) -> None:
+        """Sync every JSON schema file from the schema directory into SQLite.
+
+        Each ``*.json`` file found in the schema directory is parsed and
+        persisted via :meth:`DatabaseManager.save_schema_dict`, so newly
+        dropped schema files participate in the current run without manual
+        intervention. Individual file failures are logged and never abort the
+        sync of the remaining files.
+        """
+        if not self._schema_dir.is_dir():
+            logger.info(
+                f"[MultiTargetOrchestrator] Schema directory "
+                f"'{self._schema_dir}' does not exist; skipping schema sync."
+            )
+            return
+
+        schema_files = sorted(self._schema_dir.glob("*.json"))
+        if not schema_files:
+            logger.info(
+                f"[MultiTargetOrchestrator] No JSON schema files found in "
+                f"'{self._schema_dir}'; skipping schema sync."
+            )
+            return
+
+        db = self._external_db_manager
+        owns_db = False
+        if db is None:
+            try:
+                db = DatabaseManager(db_path=self._db_path)
+                owns_db = True
+            except Exception as err:
+                logger.error(
+                    f"[MultiTargetOrchestrator] Failed to open control-plane "
+                    f"database for schema sync: {err}"
+                )
+                return
+        try:
+            synced = 0
+            for schema_path in schema_files:
+                try:
+                    raw_text = schema_path.read_text(encoding="utf-8")
+                    payload = json.loads(raw_text)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+                    logger.error(
+                        f"[MultiTargetOrchestrator] Failed to read or parse "
+                        f"schema file '{schema_path.name}': {err}"
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    logger.error(
+                        f"[MultiTargetOrchestrator] Schema file "
+                        f"'{schema_path.name}' is not a JSON object; skipping."
+                    )
+                    continue
+                try:
+                    target_id = db.save_schema_dict(payload)
+                    synced += 1
+                    logger.info(
+                        f"[MultiTargetOrchestrator] Synced schema file "
+                        f"'{schema_path.name}' (target_id={target_id})."
+                    )
+                except Exception as err:
+                    logger.error(
+                        f"[MultiTargetOrchestrator] Failed to persist schema "
+                        f"file '{schema_path.name}': {err}"
+                    )
+            logger.info(
+                f"[MultiTargetOrchestrator] Schema sync complete: "
+                f"{synced}/{len(schema_files)} file(s) persisted."
+            )
+        finally:
+            if owns_db:
+                db.close()
 
     def _discover_target_domains(self) -> List[str]:
         """Resolve the orchestrator's target domains.
@@ -236,6 +318,7 @@ class MultiTargetOrchestrator:
             )
             return
 
+        self._sync_schema_files()
         domains = self._discover_target_domains()
         if not domains:
             logger.warning(

@@ -65,11 +65,6 @@ _MENU_CHOICES: Dict[str, str] = {
 # Live monitor rendering
 # ---------------------------------------------------------------------- #
 
-def _snapshot_provider_count(snapshot: EventSnapshot) -> int:
-    """Count distinct provider domains contributing to one event snapshot."""
-    return len(snapshot.providers)
-
-
 def _format_sample_line(
     snapshots: Sequence[EventSnapshot], max_width: int
 ) -> str:
@@ -119,13 +114,34 @@ def _format_sample_line(
 def _print_status_summary(
     orchestrator: MultiTargetOrchestrator, max_width: int
 ) -> None:
-    """Print a one-line summary of the current state of the orchestrator."""
+    """Print a one-line summary of the current state of the orchestrator.
+
+    Aggregates granular in-memory statistics from the live snapshots:
+    total events, total markets, total individual odds values held in
+    memory, and the count of multi-provider converged events.
+    """
     snapshots = orchestrator.get_live_snapshots()
     total_events = len(snapshots)
-    converged = sum(1 for s in snapshots if _snapshot_provider_count(s) > 1)
+    total_markets = 0
+    total_odds_values = 0
+    converged_events = 0
+
+    for snapshot in snapshots:
+        markets = snapshot.markets
+        total_markets += len(markets)
+        for market in markets:
+            for outcomes in market.quotes.values():
+                total_odds_values += sum(
+                    1 for outcome in outcomes if outcome.odds_decimal is not None
+                )
+        if len(snapshot.providers) > 1:
+            converged_events += 1
+
     sample_line = _format_sample_line(snapshots, max_width=max_width)
     print(
-        f"[*] Events: {total_events} | Converged: {converged} | Sample: {sample_line}"
+        f"[*] Events: {total_events} | Markets: {total_markets} | "
+        f"Odds values: {total_odds_values} | Converged: {converged_events} | "
+        f"Sample: {sample_line}"
     )
 
 

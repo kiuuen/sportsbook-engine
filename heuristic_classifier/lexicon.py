@@ -96,6 +96,8 @@ class LexiconManager:
             )
 
         for category, terms in data.items():
+            if category == "pagination_scaling":
+                continue  # Numeric scaling config consumed by the replay executor.
             if not isinstance(terms, list):
                 logger.warning(
                     "Skipping lexicon category '%s': expected a list of terms.",

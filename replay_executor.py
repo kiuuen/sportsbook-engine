@@ -3,7 +3,9 @@ import logging
 import pathlib
 import re
 import sqlite3
-from typing import Any, Dict, List, Optional, Set, Union
+import urllib.parse
+from functools import lru_cache
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import HTTPError, RequestException
@@ -16,6 +18,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 _MAX_CHAIN_DEPTH: int = 3
 
 _IMPERSONATION_TARGET: str = "chrome124"
+
+_PAGINATION_LEXICON_PATH = pathlib.Path(__file__).with_name("sportsbook_lexicon.json")
+
+
+@lru_cache(maxsize=1)
+def _load_pagination_config() -> Tuple[FrozenSet[str], Optional[int], Optional[int]]:
+    """Load pagination vocabulary and scaling values from the sportsbook lexicon.
+
+    Returns a tuple of (parameter names, low-value threshold, batch capacity).
+    Threshold and capacity are ``None`` when the lexicon does not define them;
+    callers must skip upscaling in that case rather than assume defaults.
+    """
+    try:
+        data = json.loads(_PAGINATION_LEXICON_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        logging.warning(f"[ReplayExecutor] Failed to load pagination lexicon: {err}")
+        return frozenset(), None, None
+
+    names = frozenset(
+        str(term).strip().lower()
+        for term in data.get("pagination_parameters", [])
+        if isinstance(term, str) and term.strip()
+    )
+    threshold: Optional[int] = None
+    capacity: Optional[int] = None
+    scaling = data.get("pagination_scaling")
+    if isinstance(scaling, dict):
+        try:
+            threshold = int(scaling["low_value_threshold"])
+            capacity = int(scaling["batch_capacity"])
+        except (KeyError, TypeError, ValueError) as err:
+            logging.warning(
+                f"[ReplayExecutor] Invalid pagination_scaling in lexicon: {err}"
+            )
+    return names, threshold, capacity
 
 class ReplayExecutionError(RuntimeError):
     """Raised when a replay request fails for a cause that was already logged."""
@@ -344,6 +381,50 @@ class ReplayExecutor:
             headers.setdefault("origin", origin)
         return headers
 
+    @classmethod
+    def _upscale_pagination_params(cls, url: str) -> str:
+        """Scale restrictive pagination query parameters up to the batch capacity.
+
+        Pagination key names and the threshold/capacity values come exclusively
+        from ``sportsbook_lexicon.json``. Only numeric values at or below the
+        threshold are replaced; every other query pair, the path, and any
+        remaining ``{placeholder}`` segments are preserved verbatim. When the
+        lexicon is unavailable or incomplete, the URL is returned unchanged.
+        """
+        names, threshold, capacity = _load_pagination_config()
+        if not names or threshold is None or capacity is None:
+            return url
+
+        split = urllib.parse.urlsplit(url)
+        if not split.query:
+            return url
+
+        adjusted: List[str] = []
+        changed = False
+        for pair in split.query.split("&"):
+            if "=" in pair:
+                raw_key, raw_value = pair.split("=", 1)
+            else:
+                raw_key, raw_value = pair, ""
+            key = urllib.parse.unquote_plus(raw_key).strip().lower()
+            if (
+                key in names
+                and raw_value.isdigit()
+                and int(raw_value) <= threshold
+            ):
+                logging.info(
+                    f"[ReplayExecutor] Upscaled pagination parameter '{key}' "
+                    f"from {raw_value} to {capacity}."
+                )
+                adjusted.append(f"{raw_key}={capacity}")
+                changed = True
+            else:
+                adjusted.append(pair)
+
+        if not changed:
+            return url
+        return urllib.parse.urlunsplit(split._replace(query="&".join(adjusted)))
+
     def hydrate_url(self, template_url: str, params: Optional[Dict[str, Any]] = None) -> str:
         hydrated = template_url
         if params:
@@ -351,6 +432,8 @@ class ReplayExecutor:
                 placeholder = f"{{{key}}}"
                 if placeholder in hydrated:
                     hydrated = hydrated.replace(placeholder, str(val))
+
+        hydrated = self._upscale_pagination_params(hydrated)
 
         def _fallback_replacer(match: re.Match) -> str:
             param_name = match.group(1).lower()

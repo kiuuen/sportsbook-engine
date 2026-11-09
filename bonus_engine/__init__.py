@@ -12,14 +12,22 @@ from bonus_engine.models import (
     VerificationState,
     WageringRequirement,
 )
+from bonus_engine.scanner import (
+    PromoLexiconLoader,
+    PromotionScanner,
+    ScanEvaluation,
+)
 
 __all__ = [
     "BonusDatabaseManager",
     "CalculationBase",
     "EvidenceCitation",
     "MonetaryConstraints",
+    "PromoLexiconLoader",
     "Promotion",
+    "PromotionScanner",
     "PromotionType",
+    "ScanEvaluation",
     "SourceProvenance",
     "TemporalValidity",
     "VerificationState",

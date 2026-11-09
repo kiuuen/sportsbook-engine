@@ -1,0 +1,71 @@
+{
+  "positive_wagering_requirements": [
+    "wagering requirement", "wagering requirements", "playthrough",
+    "play through", "rollover", "roll over", "turnover",
+    "wagering contribution", "stake contribution", "counts towards wagering",
+    "counts toward wagering", "bonus wagering", "times wagering",
+    "wagering multiplier", "contribute towards the wagering"
+  ],
+  "positive_rollover_mechanics": [
+    "times the bonus", "times the deposit", "times the amount",
+    "multiple of the bonus", "clear the bonus", "clear your bonus",
+    "release the bonus", "convert bonus funds", "bonus funds convert",
+    "turn into withdrawable", "become withdrawable", "release rate",
+    "5x", "10x", "20x", "30x", "35x", "40x", "50x"
+  ],
+  "positive_odds_constraints": [
+    "minimum odds", "min odds", "minimum price", "min price",
+    "qualifying odds", "eligible odds", "odds requirement", "at odds of",
+    "odds of", "or higher", "or above", "or greater", "or more",
+    "decimal odds", "fractional odds", "eligible markets",
+    "eligible selections", "eligible market types", "accumulator odds",
+    "minimum cumulative odds", "minimum combined odds"
+  ],
+  "positive_promotion_structures": [
+    "welcome bonus", "welcome offer", "welcome package", "sign-up bonus",
+    "sign up offer", "free bet", "freebet", "free bets", "bonus bet",
+    "bet credits", "bet credit", "risk free bet", "risk-free bet",
+    "deposit match", "deposit bonus", "match bonus", "100% bonus",
+    "reload bonus", "cashback", "money back", "money-back",
+    "acca insurance", "accumulator insurance", "accumulator bonus",
+    "boosted odds", "odds boost", "enhanced odds", "profit boost",
+    "bonus code", "promo code", "promotional code", "stake not returned",
+    "free bet stake", "qualifying bet refund"
+  ],
+  "positive_qualifying_actions": [
+    "qualifying deposit", "qualifying bet", "qualifying wager",
+    "qualifying stake", "minimum deposit", "min deposit",
+    "first deposit", "first bet", "first wager", "first settled bet",
+    "opt in", "opt-in", "opting in", "claim the bonus",
+    "claim your bonus", "use code", "enter code", "enter the code",
+    "place a bet", "place a wager", "settled bet", "settled wager",
+    "real money", "cash stake", "real money stake"
+  ],
+  "positive_temporal_limits": [
+    "expires", "expire", "expiry", "valid until", "valid from",
+    "valid for", "within 7 days", "within 14 days", "within 30 days",
+    "within 90 days", "days of claiming", "days of registration",
+    "days of the deposit", "time limit", "deadline", "promotion period",
+    "offer ends", "ends on", "terms apply", "t&cs apply", "full t&cs",
+    "terms and conditions apply"
+  ],
+  "noise_casino_gaming": [
+    "casino", "online casino", "live casino", "live dealer",
+    "slots", "slot game", "slot games", "slot machine", "online slots",
+    "video slots", "megaways", "roulette", "blackjack", "baccarat",
+    "poker", "video poker", "table games", "live tables", "card games",
+    "jackpot", "jackpots", "progressive jackpot", "bingo",
+    "scratch card", "scratchcards", "scratch cards", "keno", "craps",
+    "free spins", "spin the wheel", "casino bonus", "live game shows"
+  ],
+  "noise_account_cashier": [
+    "payment method", "payment methods", "withdrawal", "withdrawals",
+    "withdrawal fee", "deposit fee", "transaction fee", "bank transfer",
+    "credit card", "debit card", "e-wallet", "skrill", "neteller",
+    "paypal", "login", "log in", "sign in", "password",
+    "account verification", "verify your account", "know your customer",
+    "kyc", "privacy policy", "cookie policy", "terms of service",
+    "responsible gambling", "gambling commission", "help centre",
+    "customer support", "contact us", "faq", "unsubscribe", "newsletter"
+  ]
+}

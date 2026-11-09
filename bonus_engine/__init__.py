@@ -17,19 +17,30 @@ from bonus_engine.scanner import (
     PromotionScanner,
     ScanEvaluation,
 )
+from bonus_engine.extractor import ExtractionConfig, PromotionExtractor
+from bonus_engine.validator import (
+    DiscrepancyCode,
+    InvariantValidator,
+    ValidationReport,
+)
 
 __all__ = [
     "BonusDatabaseManager",
     "CalculationBase",
+    "DiscrepancyCode",
     "EvidenceCitation",
+    "ExtractionConfig",
+    "InvariantValidator",
     "MonetaryConstraints",
     "PromoLexiconLoader",
     "Promotion",
+    "PromotionExtractor",
     "PromotionScanner",
     "PromotionType",
     "ScanEvaluation",
     "SourceProvenance",
     "TemporalValidity",
+    "ValidationReport",
     "VerificationState",
     "WageringRequirement",
 ]

@@ -532,11 +532,9 @@ class Promotion:
             raise ValueError("Promotion.title must be a non-empty string")
         if not isinstance(self.promotion_id, str) or not self.promotion_id.strip():
             raise ValueError("Promotion.promotion_id must be a non-empty string")
-        self.promotion_type = _coerce_enum(
-            self.promotion_type, PromotionType, PromotionType.OTHER
-        )
+        self.promotion_type = _coerce_enum(self.promotion_type, PromotionType)
         self.verification_state = _coerce_enum(
-            self.verification_state, VerificationState, VerificationState.EXTRACTED
+            self.verification_state, VerificationState
         )
         for label, value in (
             ("wagering", self.wagering),

@@ -49,6 +49,7 @@ class PromotionType(str, Enum):
 class CalculationBase(str, Enum):
     """Canonical bases on which a rollover requirement may be computed."""
 
+    UNSPECIFIED = "unspecified"
     BONUS_AMOUNT = "bonus_amount"
     DEPOSIT_PLUS_BONUS = "deposit_plus_bonus"
     FREEBET_STAKE = "freebet_stake"
@@ -63,6 +64,9 @@ class VerificationState(str, Enum):
     INVARIANT_VALIDATED = "invariant_validated"
     OPERATOR_CONFIRMED = "operator_confirmed"
     REJECTED = "rejected"
+    MANUAL_REVIEW = "manual_review"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
 
 
 _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
@@ -70,10 +74,13 @@ _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
         {VerificationState.INVARIANT_VALIDATED, VerificationState.REJECTED}
     ),
     VerificationState.INVARIANT_VALIDATED: frozenset(
-        {VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED}
+        {VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED, VerificationState.MANUAL_REVIEW}
     ),
-    VerificationState.OPERATOR_CONFIRMED: frozenset(),
+    VerificationState.OPERATOR_CONFIRMED: frozenset({VerificationState.PENDING_APPROVAL}),
     VerificationState.REJECTED: frozenset(),
+    VerificationState.MANUAL_REVIEW: frozenset({VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED}),
+    VerificationState.PENDING_APPROVAL: frozenset({VerificationState.APPROVED, VerificationState.REJECTED}),
+    VerificationState.APPROVED: frozenset()
 }
 
 
@@ -317,8 +324,8 @@ class TemporalValidity:
 class WageringRequirement:
     """Mathematical parameters required to evaluate wagering feasibility."""
 
-    rollover_multiplier: float
-    calculation_base: CalculationBase = CalculationBase.BONUS_AMOUNT
+    rollover_multiplier: Optional[float] = None
+    calculation_base: CalculationBase = CalculationBase.UNSPECIFIED
     min_selection_odds: Optional[float] = None
     max_selection_odds: Optional[float] = None
     min_accumulator_odds: Optional[float] = None
@@ -330,12 +337,12 @@ class WageringRequirement:
 
     def __post_init__(self) -> None:
         rollover = _coerce_opt_float(self.rollover_multiplier)
-        if rollover is None or rollover < 0:
+        if rollover is not None and rollover < 0:
             raise ValueError("rollover_multiplier must be a non-negative number")
         self.rollover_multiplier = rollover
         self.calculation_base = (
             _coerce_enum(self.calculation_base, CalculationBase)
-            or CalculationBase.BONUS_AMOUNT
+            or CalculationBase.UNSPECIFIED
         )
         self.min_selection_odds = _coerce_opt_float(self.min_selection_odds)
         self.max_selection_odds = _coerce_opt_float(self.max_selection_odds)
@@ -402,14 +409,12 @@ class WageringRequirement:
         if not isinstance(data, dict):
             raise TypeError("WageringRequirement.from_dict expects a dictionary")
         rollover = _coerce_opt_float(data.get("rollover_multiplier"))
-        if rollover is None:
-            raise ValueError("WageringRequirement requires 'rollover_multiplier'")
         return cls(
             rollover_multiplier=rollover,
             calculation_base=_coerce_enum(
                 data.get("calculation_base"), CalculationBase
             )
-            or CalculationBase.BONUS_AMOUNT,
+            or CalculationBase.UNSPECIFIED,
             min_selection_odds=_coerce_opt_float(data.get("min_selection_odds")),
             max_selection_odds=_coerce_opt_float(data.get("max_selection_odds")),
             min_accumulator_odds=_coerce_opt_float(data.get("min_accumulator_odds")),
@@ -517,7 +522,7 @@ class Promotion:
     target_domain: str
     promotion_type: PromotionType
     title: str
-    promotion_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    promotion_id: str = field(default_factory=lambda: hashlib.sha256(f"{uuid.uuid4().hex}{datetime.now().isoformat()}".encode()).hexdigest())
     wagering: Optional[WageringRequirement] = None
     temporal: Optional[TemporalValidity] = None
     monetary: Optional[MonetaryConstraints] = None
@@ -619,7 +624,7 @@ class Promotion:
             promotion_type=promotion_type,
             title=title,
             promotion_id=SafePayloadUtils.coerce_str(data.get("promotion_id"))
-            or uuid.uuid4().hex,
+            or hashlib.sha256(f"{uuid.uuid4().hex}{datetime.now().isoformat()}".encode()).hexdigest(),
             wagering=WageringRequirement.from_dict(raw_wagering)
             if isinstance(raw_wagering, dict)
             else None,

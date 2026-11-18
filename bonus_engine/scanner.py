@@ -5,7 +5,17 @@ responses) for promotional signal density before costly downstream LLM
 extraction is invoked. All domain vocabulary lives exclusively in
 ``promo_lexicon.json``; this module hardcodes only the structural
 category-name contract (``positive_*`` / ``noise_*`` prefixes and the
-dedicated casino noise category).
+dedicated casino noise category). Matching is performed on a casefolded,
+diacritic-stripped projection of the text while all windows are sliced from
+the original text via an index map; multiple occurrences are clustered with
+a bounded gap so distant matches (e.g., header navigation vs. footer
+disclaimers) never produce a full-document window; `candidate_window` is the
+densest cluster (most occurrences, earliest, then shortest on ties) and
+`candidate_windows` lists every cluster window in document order.
+
+Raises:
+    FileNotFoundError: If the lexicon file does not exist.
+    ValueError: If the file is not valid JSON or its root is not an object.
 """
 
 from __future__ import annotations
@@ -14,6 +24,7 @@ import json
 import logging
 import pathlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -21,6 +32,35 @@ __all__ = ["PromoLexiconLoader", "PromotionScanner", "ScanEvaluation"]
 
 logger = logging.getLogger(__name__)
 
+def _normalize_text(text: str) -> str:
+    """Casefold and strip combining diacritics from a string.
+
+    Used for lexicon terms (where index alignment is irrelevant).
+    """
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFD", text.casefold())
+        if not unicodedata.combining(char)
+    )
+
+def _normalize_with_index(text: str) -> Tuple[str, List[int]]:
+    """Normalize text while recording a per-character index map.
+
+    Each character is casefolded and NFD-decomposed individually; combining
+    marks are dropped. Returns the normalized string plus a list mapping
+    every normalized-string index to the originating index in ``text``, so
+    match spans found in the normalized string can be sliced out of the
+    original (accented) source text without corruption.
+    """
+    normalized_chars: List[str] = []
+    index_map: List[int] = []
+    for position, char in enumerate(text):
+        for folded_char in unicodedata.normalize("NFD", char.casefold()):
+            if unicodedata.combining(folded_char):
+                continue
+            normalized_chars.append(folded_char)
+            index_map.append(position)
+    return "".join(normalized_chars), index_map
 
 class PromoLexiconLoader:
     """Loads and serves the promotional lexicon from its JSON source file.
@@ -51,8 +91,11 @@ class PromoLexiconLoader:
 
     @staticmethod
     def _compile_term(term: str) -> Tuple[str, re.Pattern[str]]:
-        """Compile one lexicon term into a word-boundary regex matcher."""
-        pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
+        """Compile one lexicon term into a diacritic-insensitive matcher."""
+        normalized_term = _normalize_text(term)
+        pattern = re.compile(
+            rf"(?<!\w){re.escape(normalized_term)}(?!\w)", re.IGNORECASE
+        )
         return term, pattern
 
     def load_lexicon(self) -> None:
@@ -97,7 +140,6 @@ class PromoLexiconLoader:
                     self.NOISE_PREFIX,
                 )
 
-
 @dataclass
 class ScanEvaluation:
     """Structured outcome of evaluating one candidate text payload."""
@@ -108,6 +150,8 @@ class ScanEvaluation:
     disqualifiers: List[str]
     is_viable: bool
     candidate_window: str
+    candidate_windows: List[str]
+    window_word_count: int
     word_count: int
     source_text_length: int
 
@@ -123,10 +167,11 @@ class ScanEvaluation:
             "disqualifiers": list(self.disqualifiers),
             "is_viable": self.is_viable,
             "candidate_window": self.candidate_window,
+            "candidate_windows": list(self.candidate_windows),
+            "window_word_count": self.window_word_count,
             "word_count": self.word_count,
             "source_text_length": self.source_text_length,
         }
-
 
 class PromotionScanner:
     """Evaluates text chunks for promotional signal density and viability.
@@ -146,6 +191,8 @@ class PromotionScanner:
         casino_penalty_factor: Weight applied to each casino noise hit.
         window_context_chars: Characters of context padded around matched
             positive spans when isolating the candidate window.
+        max_cluster_gap_chars: Maximum gap in characters between positive
+            match spans for them to belong to the same candidate cluster.
         density_normalizer_words: Word count at which one positive hit
             represents full signal density.
     """
@@ -160,6 +207,7 @@ class PromotionScanner:
         noise_penalty_factor: float = 1.0,
         casino_penalty_factor: float = 1.5,
         window_context_chars: int = 120,
+        max_cluster_gap_chars: int = 240,
         density_normalizer_words: float = 40.0,
     ) -> None:
         if not isinstance(viability_threshold, (int, float)):
@@ -170,6 +218,7 @@ class PromotionScanner:
             "min_positive_categories",
             "min_positive_terms",
             "window_context_chars",
+            "max_cluster_gap_chars",
         ):
             value = locals()[name]
             if not isinstance(value, int) or value < 0:
@@ -191,37 +240,69 @@ class PromotionScanner:
         self._noise_penalty_factor = float(noise_penalty_factor)
         self._casino_penalty_factor = float(casino_penalty_factor)
         self._window_context_chars = window_context_chars
+        self._max_cluster_gap_chars = max_cluster_gap_chars
         self._density_normalizer_words = float(density_normalizer_words)
 
     @staticmethod
     def _collect_matches(
         normalized_text: str,
+        index_map: List[int],
         category_terms: Dict[str, List[Tuple[str, re.Pattern[str]]]],
     ) -> Tuple[Dict[str, List[str]], List[Tuple[int, int]]]:
-        """Find distinct matched terms per category plus their char spans."""
+        """Find every occurrence of each term per category.
+
+        Returns distinct matched terms per category plus the span of every
+        occurrence mapped back to original-text indices via ``index_map``.
+        """
         matches: Dict[str, List[str]] = {}
         spans: List[Tuple[int, int]] = []
         for category, term_patterns in category_terms.items():
             for term, pattern in term_patterns:
-                found = pattern.search(normalized_text)
-                if found is None:
+                occurrences = [
+                    (index_map[found.start()], index_map[found.end() - 1] + 1)
+                    for found in pattern.finditer(normalized_text)
+                ]
+                if not occurrences:
                     continue
                 matches.setdefault(category, [])
                 if term not in matches[category]:
                     matches[category].append(term)
-                spans.append((found.start(), found.end()))
+                spans.extend(occurrences)
         return matches, spans
 
     @staticmethod
-    def _extract_window(
-        text: str, spans: List[Tuple[int, int]], context_chars: int
-    ) -> str:
-        """Isolate the text window covering all positive match spans."""
+    def _cluster_spans(
+        spans: List[Tuple[int, int]], max_gap: int
+    ) -> List[Tuple[int, int, int]]:
+        """Merge sorted match spans into clusters of nearby occurrences.
+
+        Two spans belong to the same cluster when the gap between them is
+        at most ``max_gap`` characters. Returns clusters as
+        ``(start, end, occurrence_count)`` tuples in ascending order.
+        """
         if not spans:
-            return ""
-        start = max(0, min(span[0] for span in spans) - context_chars)
-        end = min(len(text), max(span[1] for span in spans) + context_chars)
-        return text[start:end].strip()
+            return []
+        ordered = sorted(spans)
+        clusters: List[Tuple[int, int, int]] = []
+        start, end, count = ordered[0][0], ordered[0][1], 1
+        for span_start, span_end in ordered[1:]:
+            if span_start - end <= max_gap:
+                end = max(end, span_end)
+                count += 1
+            else:
+                clusters.append((start, end, count))
+                start, end, count = span_start, span_end, 1
+        clusters.append((start, end, count))
+        return clusters
+
+    @staticmethod
+    def _extract_window(
+        text: str, start: int, end: int, context_chars: int
+    ) -> str:
+        """Slice one bounded window around a single cluster span."""
+        window_start = max(0, start - context_chars)
+        window_end = min(len(text), end + context_chars)
+        return text[window_start:window_end].strip()
 
     def evaluate_text(self, text: Optional[str]) -> ScanEvaluation:
         """Evaluate a single text payload and return a structured outcome.
@@ -233,14 +314,14 @@ class PromotionScanner:
             text = ""
         if not isinstance(text, str):
             raise TypeError("evaluate_text expects a string payload or None")
-        normalized = text.lower()
-        word_count = len(re.findall(r"[a-z0-9]+", normalized))
+        normalized, index_map = _normalize_with_index(text)
+        word_count = len(re.findall(r"[^\W_]+", text, flags=re.UNICODE))
 
         positive_matches, positive_spans = self._collect_matches(
-            normalized, self._lexicon.positive_terms
+            normalized, index_map, self._lexicon.positive_terms
         )
         noise_matches, _ = self._collect_matches(
-            normalized, self._lexicon.noise_terms
+            normalized, index_map, self._lexicon.noise_terms
         )
 
         positive_weight = float(
@@ -267,11 +348,37 @@ class PromotionScanner:
         ):
             disqualifiers.append("insufficient_signals")
 
+        clusters = self._cluster_spans(positive_spans, self._max_cluster_gap_chars)
+        candidate_windows = [
+            self._extract_window(text, start, end, self._window_context_chars)
+            for start, end, _ in clusters
+        ]
+        if clusters:
+            best_start, best_end, _ = max(
+                clusters,
+                key=lambda cluster: (
+                    cluster[2],
+                    -cluster[0],
+                    -(cluster[1] - cluster[0]),
+                ),
+            )
+            candidate_window = self._extract_window(
+                text, best_start, best_end, self._window_context_chars
+            )
+            window_word_count = len(
+                re.findall(
+                    r"[^\W_]+", text[best_start:best_end], flags=re.UNICODE
+                )
+            )
+        else:
+            candidate_window = ""
+            window_word_count = 0
+
+        density = positive_weight / max(
+            1.0, window_word_count / self._density_normalizer_words
+        )
         total_weight = positive_weight + noise_weight
         purity = positive_weight / total_weight if total_weight > 0 else 0.0
-        density = positive_weight / max(
-            1.0, word_count / self._density_normalizer_words
-        )
         relevance_score = round(
             max(0.0, min(1.0, purity * min(1.0, density))), 4
         )
@@ -287,9 +394,9 @@ class PromotionScanner:
             matched_noise_terms=matched_noise_terms,
             disqualifiers=disqualifiers,
             is_viable=is_viable,
-            candidate_window=self._extract_window(
-                text, positive_spans, self._window_context_chars
-            ),
+            candidate_window=candidate_window,
+            candidate_windows=candidate_windows,
+            window_word_count=window_word_count,
             word_count=word_count,
             source_text_length=len(text),
         )

@@ -1,17 +1,27 @@
 {
   "positive_wagering_requirements": [
-    "wagering requirement", "wagering requirements", "playthrough",
+    "wagering requirement", "wagerings requirements", "playthrough",
     "play through", "rollover", "roll over", "turnover",
     "wagering contribution", "stake contribution", "counts towards wagering",
     "counts toward wagering", "bonus wagering", "times wagering",
-    "wagering multiplier", "contribute towards the wagering"
+    "wagering multiplier", "contribute towards the wagering",
+    "requisito de apuesta", "requisitos de apuesta", "requisito de apuestas",
+    "requisitos de apuestas", "rodillo de apuesta", "apostar el bono",
+    "apostar el importe", "multiplicador de apuestas", "contribución de apuesta",
+    "contribución de la apuesta", "cuenta para el requisito de apuesta",
+    "apuestas del bono", "veces de apuesta"
   ],
   "positive_rollover_mechanics": [
     "times the bonus", "times the deposit", "times the amount",
     "multiple of the bonus", "clear the bonus", "clear your bonus",
     "release the bonus", "convert bonus funds", "bonus funds convert",
     "turn into withdrawable", "become withdrawable", "release rate",
-    "5x", "10x", "20x", "30x", "35x", "40x", "50x"
+    "5x", "10x", "20x", "30x", "35x", "40x", "50x",
+    "veces el bono", "veces el depósito", "veces el importe", "múltiplo del bono",
+    "liberar el bono", "libere el bono", "convertir el bono",
+    "el bono se convierte", "fondos de bono se convierten",
+    "se convierte en dinero retirable", "convertirse en retirable",
+    "tasa de liberación"
   ],
   "positive_odds_constraints": [
     "minimum odds", "min odds", "minimum price", "min price",
@@ -19,7 +29,12 @@
     "odds of", "or higher", "or above", "or greater", "or more",
     "decimal odds", "fractional odds", "eligible markets",
     "eligible selections", "eligible market types", "accumulator odds",
-    "minimum cumulative odds", "minimum combined odds"
+    "minimum cumulative odds", "minimum combined odds",
+    "cuota mínima", "cuotas mínimas", "cuota mínima de", "requisito de cuotas",
+    "cuotas elegibles", "mercados elegibles", "selecciones elegibles",
+    "tipos de mercado elegibles", "cuotas acumuladoras",
+    "cuota acumulada mínima", "cuota combinada mínima", "o superior", "o más",
+    "cuotas decimales", "cuotas fraccionarias", "a cuotas de"
   ],
   "positive_promotion_structures": [
     "welcome bonus", "welcome offer", "welcome package", "sign-up bonus",
@@ -30,7 +45,16 @@
     "acca insurance", "accumulator insurance", "accumulator bonus",
     "boosted odds", "odds boost", "enhanced odds", "profit boost",
     "bonus code", "promo code", "promotional code", "stake not returned",
-    "free bet stake", "qualifying bet refund"
+    "free bet stake", "qualifying bet refund",
+    "bono de bienvenida", "oferta de bienvenida", "paquete de bienvenida",
+    "bono de registro", "apuesta gratis", "apuestas gratis", "apuesta gratuita",
+    "bono de apuesta", "bonos de apuesta", "bono de depósito",
+    "bono de depósito igualado", "bono igualado", "bono de recarga", "reembolso",
+    "devolución de la apuesta", "seguro de combinada", "bono de combinada",
+    "cuotas mejoradas", "cuotas potenciadas", "supercuotas",
+    "impulso de ganancias", "mejora de cuotas", "código promocional",
+    "código de bono", "el stake no se devuelve", "stake de la apuesta gratis",
+    "reembolso de la apuesta calificante"
   ],
   "positive_qualifying_actions": [
     "qualifying deposit", "qualifying bet", "qualifying wager",
@@ -39,7 +63,13 @@
     "opt in", "opt-in", "opting in", "claim the bonus",
     "claim your bonus", "use code", "enter code", "enter the code",
     "place a bet", "place a wager", "settled bet", "settled wager",
-    "real money", "cash stake", "real money stake"
+    "real money", "cash stake", "real money stake",
+    "depósito calificante", "apuesta calificante", "apuesta de calificación",
+    "depósito mínimo", "primer depósito", "primera apuesta",
+    "primera apuesta liquidada", "participar", "optar por",
+    "aceptar la promoción", "reclamar el bono", "reclama tu bono",
+    "usar el código", "introducir el código", "realizar una apuesta",
+    "colocar una apuesta", "apuesta liquidada", "apuesta con dinero real"
   ],
   "positive_temporal_limits": [
     "expires", "expire", "expiry", "valid until", "valid from",
@@ -47,7 +77,13 @@
     "within 90 days", "days of claiming", "days of registration",
     "days of the deposit", "time limit", "deadline", "promotion period",
     "offer ends", "ends on", "terms apply", "t&cs apply", "full t&cs",
-    "terms and conditions apply"
+    "terms and conditions apply",
+    "caduca", "caducidad", "válido hasta", "válido desde", "válido durante",
+    "dentro de 7 días", "dentro de 14 días", "dentro de 30 días",
+    "dentro de 90 días", "días de la reclamación", "días del registro",
+    "días del depósito", "límite de tiempo", "fecha límite",
+    "período de la promoción", "la oferta termina", "termina el",
+    "se aplican términos", "se aplican los t&c", "términos y condiciones completos"
   ],
   "noise_casino_gaming": [
     "casino", "online casino", "live casino", "live dealer",
@@ -56,7 +92,12 @@
     "poker", "video poker", "table games", "live tables", "card games",
     "jackpot", "jackpots", "progressive jackpot", "bingo",
     "scratch card", "scratchcards", "scratch cards", "keno", "craps",
-    "free spins", "spin the wheel", "casino bonus", "live game shows"
+    "free spins", "spin the wheel", "casino bonus", "live game shows",
+    "casino en línea", "casino en vivo", "crupier en vivo", "tragamonedas",
+    "tragamonedas en línea", "máquina tragamonedas", "ruleta", "póker",
+    "video póker", "juegos de mesa", "mesas en vivo", "juegos de cartas",
+    "bote progresivo", "rasca y gana", "tarjetas de raspar", "dados",
+    "giros gratis", "gira la rueda", "bono de casino", "programas de juego en vivo"
   ],
   "noise_account_cashier": [
     "payment method", "payment methods", "withdrawal", "withdrawals",
@@ -66,6 +107,15 @@
     "account verification", "verify your account", "know your customer",
     "kyc", "privacy policy", "cookie policy", "terms of service",
     "responsible gambling", "gambling commission", "help centre",
-    "customer support", "contact us", "faq", "unsubscribe", "newsletter"
+    "customer support", "contact us", "faq", "unsubscribe", "newsletter",
+    "método de pago", "métodos de pago", "retiro", "retiros", "tarifa de retiro",
+    "tarifa de depósito", "tarifa de transacción", "transferencia bancaria",
+    "tarjeta de crédito", "tarjeta de débito", "monedero electrónico",
+    "iniciar sesión", "cerrar sesión", "contraseña", "verificación de cuenta",
+    "verifique su cuenta", "conozca a su cliente", "política de privacidad",
+    "política de cookies", "términos del servicio", "juego responsable",
+    "comisión de juego", "centro de ayuda", "atención al cliente",
+    "contáctenos", "preguntas frecuentes", "cancelar la suscripción",
+    "boletín informativo"
   ]
 }

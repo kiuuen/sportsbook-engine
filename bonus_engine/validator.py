@@ -8,7 +8,9 @@ names (the structural contract of ``bonus_engine.models``).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+import unicodedata
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -16,13 +18,23 @@ from .models import (
     CalculationBase,
     MonetaryConstraints,
     Promotion,
-    PromotionType,
     TemporalValidity,
     WageringRequirement,
 )
 
 __all__ = ["DiscrepancyCode", "ValidationReport", "InvariantValidator"]
 
+_WHITESPACE_RUN_PATTERN = re.compile(r"\s+")
+
+
+def _normalize_for_matching(text: str) -> str:
+    """Casefold, strip diacritics, and collapse whitespace for tolerant matching."""
+    decomposed = "".join(
+        char
+        for char in unicodedata.normalize("NFD", text.casefold())
+        if not unicodedata.combining(char)
+    )
+    return _WHITESPACE_RUN_PATTERN.sub(" ", decomposed).strip()
 
 class DiscrepancyCode(str, Enum):
     """Machine-readable discrepancy codes emitted by invariant validation."""
@@ -37,7 +49,7 @@ class DiscrepancyCode(str, Enum):
     WAGERING_DEADLINE_IMPLAUSIBLE = "wagering_deadline_implausible"
     MISSING_EVIDENCE_CITATION = "missing_evidence_citation"
     STRUCTURAL_INVARIANT_VIOLATION = "structural_invariant_violation"
-
+    EVIDENCE_QUOTE_UNVERIFIED = "evidence_quote_unverified"
 
 @dataclass
 class ValidationReport:
@@ -57,7 +69,6 @@ class ValidationReport:
             "evidence_gaps": list(self.evidence_gaps),
         }
 
-
 class InvariantValidator:
     """Audits promotional parameters against sports-wagering domain guardrails.
 
@@ -72,10 +83,6 @@ class InvariantValidator:
         max_plausible_accumulator_legs: Highest plausible accumulator leg count.
         max_temporal_window_days: Longest plausible validity window in days.
         max_wagering_deadline_days: Longest plausible wagering deadline in days.
-        deposit_funded_types: Promotion types funded by a deposit; a bonus-only
-            calculation base on these types is flagged as ambiguous.
-        stake_funded_types: Promotion types funded by a stake/freebet; a
-            deposit-plus-bonus calculation base on these types is flagged.
     """
 
     _WAGERING_NUMERIC_FIELDS: Tuple[str, ...] = (
@@ -107,8 +114,6 @@ class InvariantValidator:
         max_plausible_accumulator_legs: int = 20,
         max_temporal_window_days: int = 365,
         max_wagering_deadline_days: int = 365,
-        deposit_funded_types: Optional[frozenset] = None,
-        stake_funded_types: Optional[frozenset] = None,
     ) -> None:
         numeric_params = (
             ("min_sports_rollover", min_sports_rollover),
@@ -147,37 +152,18 @@ class InvariantValidator:
         self._max_plausible_accumulator_legs = max_plausible_accumulator_legs
         self._max_temporal_window_days = max_temporal_window_days
         self._max_wagering_deadline_days = max_wagering_deadline_days
-        self._deposit_funded_types = (
-            deposit_funded_types
-            if deposit_funded_types is not None
-            else frozenset(
-                {
-                    PromotionType.WELCOME,
-                    PromotionType.DEPOSIT_MATCH,
-                    PromotionType.RELOAD,
-                }
-            )
-        )
-        self._stake_funded_types = (
-            stake_funded_types
-            if stake_funded_types is not None
-            else frozenset(
-                {PromotionType.FREEBET, PromotionType.RISK_FREE_BET}
-            )
-        )
-        for name, collection in (
-            ("deposit_funded_types", self._deposit_funded_types),
-            ("stake_funded_types", self._stake_funded_types),
-        ):
-            if not isinstance(collection, frozenset) or not all(
-                isinstance(item, PromotionType) for item in collection
-            ):
-                raise TypeError(
-                    f"{name} must be a frozenset of PromotionType members"
-                )
 
-    def validate(self, promotion: Promotion) -> ValidationReport:
+    def validate(
+        self,
+        promotion: Promotion,
+        *,
+        source_text: Optional[str] = None,
+    ) -> ValidationReport:
         """Run all invariant audits and return a structured report.
+
+        When ``source_text`` is provided, every evidence citation's quoted
+        excerpt is verified to appear (whitespace/case/diacritic-tolerant)
+        in the source text; fabricated quotes are flagged.
 
         Raises:
             TypeError: If ``promotion`` is not a ``Promotion`` instance.
@@ -197,7 +183,9 @@ class InvariantValidator:
             self._audit_wagering(promotion, promotion.wagering, codes, violations)
         if promotion.temporal is not None:
             self._audit_temporal(promotion.temporal, codes, violations)
-        self._audit_evidence(promotion, codes, violations, evidence_gaps)
+        self._audit_evidence(
+            promotion, codes, violations, evidence_gaps, source_text
+        )
 
         unique_codes = list(dict.fromkeys(codes))
         return ValidationReport(
@@ -215,20 +203,29 @@ class InvariantValidator:
         violations: List[str],
     ) -> None:
         """Enforce rollover, calculation-base, and odds guardrails."""
-        if wagering.rollover_multiplier < self._min_sports_rollover:
+        if (
+            wagering.rollover_multiplier is not None
+            and wagering.rollover_multiplier < self._min_sports_rollover
+        ):
             codes.append(DiscrepancyCode.ROLLOVER_BELOW_SPORTS_FLOOR)
             violations.append(
                 f"rollover_multiplier {wagering.rollover_multiplier} is below "
                 f"the sports wagering floor {self._min_sports_rollover}"
             )
-        elif wagering.rollover_multiplier > self._casino_rollover_threshold:
+        elif (
+            wagering.rollover_multiplier is not None
+            and wagering.rollover_multiplier >= self._casino_rollover_threshold
+        ):
             codes.append(DiscrepancyCode.CASINO_STYLE_ROLLOVER)
             violations.append(
                 f"rollover_multiplier {wagering.rollover_multiplier} meets or "
                 f"exceeds the casino-style threshold "
                 f"{self._casino_rollover_threshold}"
             )
-        elif wagering.rollover_multiplier > self._max_sports_rollover:
+        elif (
+            wagering.rollover_multiplier is not None
+            and wagering.rollover_multiplier > self._max_sports_rollover
+        ):
             codes.append(DiscrepancyCode.ROLLOVER_ABOVE_SPORTS_CEILING)
             violations.append(
                 f"rollover_multiplier {wagering.rollover_multiplier} exceeds "
@@ -236,25 +233,13 @@ class InvariantValidator:
             )
 
         if (
-            promotion.promotion_type in self._deposit_funded_types
-            and wagering.calculation_base == CalculationBase.BONUS_AMOUNT
+            wagering.rollover_multiplier is not None
+            and wagering.calculation_base == CalculationBase.UNSPECIFIED
         ):
             codes.append(DiscrepancyCode.CALCULATION_BASE_AMBIGUOUS)
             violations.append(
-                f"deposit-funded promotion type "
-                f"{promotion.promotion_type.value!r} declares a bonus-only "
-                "calculation base; bonus-only versus deposit-plus-bonus "
-                "treatment is ambiguous"
-            )
-        if (
-            promotion.promotion_type in self._stake_funded_types
-            and wagering.calculation_base == CalculationBase.DEPOSIT_PLUS_BONUS
-        ):
-            codes.append(DiscrepancyCode.CALCULATION_BASE_AMBIGUOUS)
-            violations.append(
-                f"stake-funded promotion type "
-                f"{promotion.promotion_type.value!r} declares a "
-                "deposit-plus-bonus calculation base; this is ambiguous"
+                "a positive rollover requirement lacks an explicit "
+                "calculation base; rollover scope is ambiguous"
             )
 
         if (
@@ -335,13 +320,15 @@ class InvariantValidator:
         codes: List[DiscrepancyCode],
         violations: List[str],
         evidence_gaps: List[str],
+        source_text: Optional[str],
     ) -> None:
-        """Require textual citations for every extracted numerical claim."""
+        """Require citations for numeric claims and verify quote authenticity."""
+        citations = (
+            promotion.provenance.citations if promotion.provenance else []
+        )
         cited_fields = {
             citation.field_name
-            for citation in (
-                promotion.provenance.citations if promotion.provenance else []
-            )
+            for citation in citations
             if isinstance(citation.field_name, str)
         }
         for field_name, value in self._iter_numeric_claims(promotion):
@@ -354,6 +341,25 @@ class InvariantValidator:
             violations.append(
                 "Numerical claims lack evidence citations: "
                 + ", ".join(evidence_gaps)
+            )
+
+        if source_text is None or not isinstance(source_text, str) \
+                or not source_text.strip():
+            return
+        normalized_source = _normalize_for_matching(source_text)
+        unverified: List[str] = []
+        for citation in citations:
+            raw_text = citation.raw_text
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                unverified.append(citation.field_name)
+                continue
+            if _normalize_for_matching(raw_text) not in normalized_source:
+                unverified.append(citation.field_name)
+        if unverified:
+            codes.append(DiscrepancyCode.EVIDENCE_QUOTE_UNVERIFIED)
+            violations.append(
+                "Cited excerpts not found in source text: "
+                + ", ".join(sorted(set(unverified)))
             )
 
     def _iter_numeric_claims(

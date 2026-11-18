@@ -38,10 +38,8 @@ logger = logging.getLogger(__name__)
 
 TransportCallable = Callable[[str, Dict[str, str], bytes, float], Tuple[int, str]]
 
-
 class ExtractionError(RuntimeError):
     """Raised when the LLM interaction cannot produce a usable response."""
-
 
 @dataclass
 class ExtractionConfig:
@@ -157,7 +155,6 @@ class ExtractionConfig:
             raise ValueError(f"Environment integer override must be non-negative: {raw!r}")
         return value
 
-
 class PromotionExtractor:
     """Coordinates LLM extraction, model construction, and invariant routing.
 
@@ -214,15 +211,27 @@ class PromotionExtractor:
                 {
                     "promotion_type": f"<one of: {promotion_types}>",
                     "title": "<promotion title>",
+                    "promo_code": "<promotional code string or null>",
                     "wagering": {
                         "rollover_multiplier": "<number or null>",
-                        "calculation_base": f"<one of: {calculation_bases} or null>",
+                        "calculation_base": (
+                            f"<one of: {calculation_bases}>; use "
+                            "'unspecified' when the base is stated but "
+                            "cannot be determined"
+                        ),
                         "min_selection_odds": "<number or null>",
                         "max_selection_odds": "<number or null>",
                         "min_accumulator_odds": "<number or null>",
                         "min_accumulator_legs": "<integer or null>",
                         "max_stake_contribution_pct": "<number or null>",
                         "completion_deadline_days": "<integer or null>",
+                        "stake_returned": "<boolean or null>",
+                        "eligible_market_types": (
+                            "<array of strings or null>"
+                        ),
+                        "excluded_market_types": (
+                            "<array of strings or null>"
+                        ),
                     },
                     "temporal": {
                         "valid_from": "<ISO-8601 datetime or null>",
@@ -235,6 +244,10 @@ class PromotionExtractor:
                         "min_bonus_amount": "<number or null>",
                         "max_bonus_amount": "<number or null>",
                         "max_conversion_amount": "<number or null>",
+                        "bonus_percentage": "<number or null>",
+                        "excluded_payment_methods": (
+                            "<array of strings or null>"
+                        ),
                         "currency": "<ISO-4217 code or null>",
                     },
                     "notes": "<free-text clarification or null>",
@@ -254,9 +267,11 @@ class PromotionExtractor:
             "schema:\n"
             f"{json.dumps(schema, indent=2)}\n"
             "Rules: use null for any value not stated in the text; never invent "
-            "values; every numeric value must have a matching 'evidence' entry "
-            "whose 'field_name' equals the canonical field name and whose "
-            "'raw_text' quotes the source terms verbatim."
+            "values; when a rollover applies but its calculation base is not "
+            "stated, set calculation_base to 'unspecified'; every numeric value "
+            "must have a matching 'evidence' entry whose 'field_name' equals "
+            "the canonical field name and whose 'raw_text' quotes the source "
+            "terms verbatim."
         )
         return [
             {"role": "system", "content": system_prompt},
@@ -266,22 +281,29 @@ class PromotionExtractor:
     def _invoke_llm(self, candidate_text: str) -> str:
         """Invoke the configured LLM endpoint with retries and backoff.
 
+        The strict ``response_format`` option is attempted first and
+        transparently dropped when the endpoint rejects it with a client
+        error, preserving compatibility with providers that do not support it.
+
         Raises:
             ExtractionError: On exhausted retries or a non-retryable client error.
         """
-        payload = {
-            "model": self._config.model_identifier,
-            "temperature": self._config.temperature,
-            "messages": self._build_messages(candidate_text),
-            "response_format": {"type": "json_object"},
-        }
-        body = json.dumps(payload).encode("utf-8")
+        messages = self._build_messages(candidate_text)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._config.api_key}",
         }
+        use_response_format = True
         last_error = "no attempts executed"
         for attempt in range(self._config.max_retries + 1):
+            payload: Dict[str, Any] = {
+                "model": self._config.model_identifier,
+                "temperature": self._config.temperature,
+                "messages": messages,
+            }
+            if use_response_format:
+                payload["response_format"] = {"type": "json_object"}
+            body = json.dumps(payload).encode("utf-8")
             try:
                 status, response_text = self._transport(
                     self._config.endpoint_url,
@@ -298,6 +320,14 @@ class PromotionExtractor:
             if status == 200:
                 return response_text
             last_error = f"HTTP status {status}"
+            if 400 <= status < 500 and use_response_format:
+                use_response_format = False
+                logger.warning(
+                    "Endpoint rejected the strict response_format option "
+                    "(HTTP %d); retrying without it",
+                    status,
+                )
+                continue
             if status == 429 or 500 <= status < 600 or status == 0:
                 if attempt < self._config.max_retries:
                     delay = self._config.retry_backoff_seconds * (2 ** attempt)
@@ -308,14 +338,34 @@ class PromotionExtractor:
                     )
                     time.sleep(delay)
                     continue
-            else:
-                raise ExtractionError(
-                    f"Non-retryable LLM failure ({last_error})"
-                )
+                break
+            raise ExtractionError(f"Non-retryable LLM failure ({last_error})")
         raise ExtractionError(f"LLM extraction failed after retries: {last_error}")
 
+    @staticmethod
+    def _coerce_content_text(node: Any) -> Optional[str]:
+        """Flatten a string or structured content-block list into one string."""
+        if isinstance(node, str):
+            return node or None
+        if isinstance(node, list):
+            parts: List[str] = []
+            for item in node:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts) or None
+        return None
+
     def _extract_message_content(self, response_text: str) -> Optional[str]:
-        """Defensively locate the assistant message content in a response body."""
+        """Defensively locate assistant content across provider envelopes.
+
+        Supports OpenAI-style ``choices[0].message.content`` (string or
+        content-block list), legacy ``choices[0].text``, and top-level
+        ``content`` / ``output_text`` fields (string or block list).
+        """
         try:
             data = json.loads(response_text)
         except json.JSONDecodeError as err:
@@ -325,11 +375,20 @@ class PromotionExtractor:
             return None
         choices = data.get("choices")
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-            message = choices[0].get("message")
-            if isinstance(message, dict) and isinstance(message.get("content"), str):
-                return message["content"]
-        content = data.get("content")
-        return content if isinstance(content, str) else None
+            choice = choices[0]
+            message = choice.get("message")
+            if isinstance(message, dict):
+                content = self._coerce_content_text(message.get("content"))
+                if content is not None:
+                    return content
+            legacy = self._coerce_content_text(choice.get("text"))
+            if legacy is not None:
+                return legacy
+        for key in ("content", "output_text", "text"):
+            content = self._coerce_content_text(data.get(key))
+            if content is not None:
+                return content
+        return None
 
     def _parse_campaign_payload(self, content: str) -> List[Dict[str, Any]]:
         """Parse the assistant content into a list of campaign dictionaries."""
@@ -359,6 +418,50 @@ class PromotionExtractor:
             logger.warning("Dropped %d non-object campaign entries", len(campaigns) - len(valid))
         return valid
 
+    @classmethod
+    def _sanitize_wagering(cls, wagering: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize a wagering payload for null-safe model construction.
+
+        Any absent, null, or unrecognized ``calculation_base`` is rewritten
+        to the explicit ``unspecified`` representation so partial wagering
+        metadata never aborts aggregate construction.
+        """
+        sanitized = dict(wagering)
+        raw_base = sanitized.get("calculation_base")
+        if isinstance(raw_base, str):
+            token = raw_base.strip().lower()
+            try:
+                CalculationBase(token)
+            except ValueError:
+                logger.debug(
+                    "Normalizing unrecognized calculation_base %r to "
+                    "'unspecified'",
+                    raw_base,
+                )
+                token = CalculationBase.UNSPECIFIED.value
+        else:
+            token = CalculationBase.UNSPECIFIED.value
+        sanitized["calculation_base"] = token
+        return sanitized
+
+    @classmethod
+    def _sanitize_promotion_type(cls, payload: Dict[str, Any]) -> None:
+        """Coerce a missing or unrecognized promotion type to 'other'."""
+        raw_type = payload.get("promotion_type")
+        if isinstance(raw_type, str):
+            token = raw_type.strip().lower()
+            try:
+                PromotionType(token)
+            except ValueError:
+                logger.debug(
+                    "Normalizing unrecognized promotion_type %r to 'other'",
+                    raw_type,
+                )
+                token = PromotionType.OTHER.value
+            payload["promotion_type"] = token
+        elif not isinstance(raw_type, PromotionType):
+            payload["promotion_type"] = PromotionType.OTHER.value
+
     def _build_promotion(
         self,
         campaign: Dict[str, Any],
@@ -370,6 +473,9 @@ class PromotionExtractor:
         payload = dict(campaign)
         raw_evidence = payload.pop("evidence", None)
         payload["target_domain"] = target_domain
+        if isinstance(payload.get("wagering"), dict):
+            payload["wagering"] = self._sanitize_wagering(payload["wagering"])
+        self._sanitize_promotion_type(payload)
         try:
             promotion = Promotion.from_dict(payload)
         except (ValueError, TypeError) as err:
@@ -394,9 +500,9 @@ class PromotionExtractor:
             return None
         return promotion
 
-    def _apply_lifecycle(self, promotion: Promotion) -> None:
+    def _apply_lifecycle(self, promotion: Promotion, source_text: str) -> None:
         """Route a parsed promotion to its initial lifecycle state."""
-        report = self._validator.validate(promotion)
+        report = self._validator.validate(promotion, source_text=source_text)
         if report.is_compliant:
             try:
                 promotion.transition_to(VerificationState.INVARIANT_VALIDATED)
@@ -439,6 +545,7 @@ class PromotionExtractor:
         content_hash = SourceProvenance.compute_content_hash(
             raw_content if raw_content is not None else candidate_text
         )
+        evidence_source = raw_content if raw_content is not None else candidate_text
         try:
             response_text = self._invoke_llm(candidate_text)
         except ExtractionError as err:
@@ -455,7 +562,7 @@ class PromotionExtractor:
             )
             if promotion is None:
                 continue
-            self._apply_lifecycle(promotion)
+            self._apply_lifecycle(promotion, evidence_source)
             promotions.append(promotion)
         return promotions
 

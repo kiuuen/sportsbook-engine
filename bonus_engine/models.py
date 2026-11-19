@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -22,6 +21,7 @@ __all__ = [
     "PromotionType",
     "CalculationBase",
     "VerificationState",
+    "TargetAcquisitionState",
     "TemporalValidity",
     "WageringRequirement",
     "MonetaryConstraints",
@@ -54,7 +54,7 @@ class CalculationBase(str, Enum):
     DEPOSIT_PLUS_BONUS = "deposit_plus_bonus"
     FREEBET_STAKE = "freebet_stake"
     WINNINGS_ONLY = "winnings_only"
-    STAKE_PLUS_WINNINGS = "stake_plus_winnings"
+    STAKE_PLUS_WINNINGS = "stake_plus_winwings"
 
 
 class VerificationState(str, Enum):
@@ -67,6 +67,16 @@ class VerificationState(str, Enum):
     MANUAL_REVIEW = "manual_review"
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
+    SUPERSEDED = "superseded"
+
+
+class TargetAcquisitionState(str, Enum):
+    """Lifecycle states for acquiring and maintaining a target domain."""
+
+    DISCOVERED = "discovered"
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    ARCHIVED = "archived"
 
 
 _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
@@ -74,13 +84,55 @@ _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
         {VerificationState.INVARIANT_VALIDATED, VerificationState.REJECTED}
     ),
     VerificationState.INVARIANT_VALIDATED: frozenset(
-        {VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED, VerificationState.MANUAL_REVIEW}
+        {
+            VerificationState.EXTRACTED,
+            VerificationState.OPERATOR_CONFIRMED,
+            VerificationState.REJECTED,
+            VerificationState.MANUAL_REVIEW,
+        }
     ),
-    VerificationState.OPERATOR_CONFIRMED: frozenset({VerificationState.PENDING_APPROVAL}),
-    VerificationState.REJECTED: frozenset(),
-    VerificationState.MANUAL_REVIEW: frozenset({VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED}),
-    VerificationState.PENDING_APPROVAL: frozenset({VerificationState.APPROVED, VerificationState.REJECTED}),
-    VerificationState.APPROVED: frozenset()
+    VerificationState.OPERATOR_CONFIRMED: frozenset(
+        {
+            VerificationState.INVARIANT_VALIDATED,
+            VerificationState.MANUAL_REVIEW,
+            VerificationState.PENDING_APPROVAL,
+            VerificationState.SUPERSEDED,
+        }
+    ),
+    VerificationState.REJECTED: frozenset(
+        {
+            VerificationState.EXTRACTED,
+            VerificationState.INVARIANT_VALIDATED,
+            VerificationState.MANUAL_REVIEW,
+            VerificationState.PENDING_APPROVAL,
+        }
+    ),
+    VerificationState.MANUAL_REVIEW: frozenset(
+        {
+            VerificationState.INVARIANT_VALIDATED,
+            VerificationState.OPERATOR_CONFIRMED,
+            VerificationState.REJECTED,
+        }
+    ),
+    VerificationState.PENDING_APPROVAL: frozenset(
+        {
+            VerificationState.OPERATOR_CONFIRMED,
+            VerificationState.APPROVED,
+            VerificationState.REJECTED,
+        }
+    ),
+    VerificationState.APPROVED: frozenset(
+        {
+            VerificationState.PENDING_APPROVAL,
+            VerificationState.SUPERSEDED,
+        }
+    ),
+    VerificationState.SUPERSEDED: frozenset(
+        {
+            VerificationState.OPERATOR_CONFIRMED,
+            VerificationState.APPROVED,
+        }
+    ),
 }
 
 
@@ -137,11 +189,52 @@ def _coerce_opt_int(value: Any) -> Optional[int]:
     return int(coerced)
 
 
+def _coerce_opt_bool(value: Any) -> Optional[bool]:
+    """Coerce to bool or ``None``, never raising on garbage input."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("true", "yes", "1"):
+            return True
+        if token in ("false", "no", "0"):
+            return False
+    return None
+
+
 def _coerce_str_list(value: Any) -> List[str]:
     """Coerce an arbitrary payload fragment into a list of strings."""
     if not isinstance(value, (list, tuple)):
         return []
     return [item for item in (SafePayloadUtils.coerce_str(v) for v in value) if item]
+
+
+def _derive_promotion_id(
+    target_domain: str,
+    promotion_type: Union[PromotionType, str],
+    title: str,
+    source_url: Optional[str] = None,
+) -> str:
+    """Derive a deterministic SHA-256 promotion identifier from stable fields.
+
+    The identifier is reproducible across extraction runs for identical
+    ``(target_domain, promotion_type, title, source_url)`` tuples, enabling
+    the persistence layer to upsert instead of duplicating records.
+    """
+    type_value = (
+        promotion_type.value
+        if isinstance(promotion_type, PromotionType)
+        else SafePayloadUtils.coerce_str(promotion_type) or PromotionType.OTHER.value
+    )
+    canonical = "|".join(
+        part.strip().lower()
+        for part in (target_domain, type_value, title, source_url or "")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -332,6 +425,7 @@ class WageringRequirement:
     min_accumulator_legs: Optional[int] = None
     max_stake_contribution_pct: Optional[float] = None
     completion_deadline_days: Optional[int] = None
+    stake_returned: Optional[bool] = None
     eligible_market_types: List[str] = field(default_factory=list)
     excluded_market_types: List[str] = field(default_factory=list)
 
@@ -352,6 +446,7 @@ class WageringRequirement:
             self.max_stake_contribution_pct
         )
         self.completion_deadline_days = _coerce_opt_int(self.completion_deadline_days)
+        self.stake_returned = _coerce_opt_bool(self.stake_returned)
         self.eligible_market_types = _coerce_str_list(self.eligible_market_types)
         self.excluded_market_types = _coerce_str_list(self.excluded_market_types)
 
@@ -399,6 +494,7 @@ class WageringRequirement:
             "min_accumulator_legs": self.min_accumulator_legs,
             "max_stake_contribution_pct": self.max_stake_contribution_pct,
             "completion_deadline_days": self.completion_deadline_days,
+            "stake_returned": self.stake_returned,
             "eligible_market_types": list(self.eligible_market_types),
             "excluded_market_types": list(self.excluded_market_types),
         }
@@ -425,6 +521,7 @@ class WageringRequirement:
             completion_deadline_days=_coerce_opt_int(
                 data.get("completion_deadline_days")
             ),
+            stake_returned=_coerce_opt_bool(data.get("stake_returned")),
             eligible_market_types=_coerce_str_list(data.get("eligible_market_types")),
             excluded_market_types=_coerce_str_list(data.get("excluded_market_types")),
         )
@@ -439,6 +536,8 @@ class MonetaryConstraints:
     min_bonus_amount: Optional[float] = None
     max_bonus_amount: Optional[float] = None
     max_conversion_amount: Optional[float] = None
+    bonus_percentage: Optional[float] = None
+    excluded_payment_methods: List[str] = field(default_factory=list)
     currency: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -451,6 +550,10 @@ class MonetaryConstraints:
         self.min_bonus_amount = _coerce_opt_float(self.min_bonus_amount)
         self.max_bonus_amount = _coerce_opt_float(self.max_bonus_amount)
         self.max_conversion_amount = _coerce_opt_float(self.max_conversion_amount)
+        self.bonus_percentage = _coerce_opt_float(self.bonus_percentage)
+        self.excluded_payment_methods = _coerce_str_list(
+            self.excluded_payment_methods
+        )
         self.currency = SafePayloadUtils.coerce_str(self.currency)
         for label, value in (
             ("min_qualifying_deposit", self.min_qualifying_deposit),
@@ -458,6 +561,7 @@ class MonetaryConstraints:
             ("min_bonus_amount", self.min_bonus_amount),
             ("max_bonus_amount", self.max_bonus_amount),
             ("max_conversion_amount", self.max_conversion_amount),
+            ("bonus_percentage", self.bonus_percentage),
         ):
             if value is not None and value < 0:
                 raise ValueError(f"{label} must be non-negative")
@@ -479,6 +583,11 @@ class MonetaryConstraints:
             and self.max_bonus_amount < self.min_bonus_amount
         ):
             violations.append("max_bonus_amount precedes min_bonus_amount")
+        if (
+            self.bonus_percentage is not None
+            and not 0.0 <= self.bonus_percentage <= 100.0
+        ):
+            violations.append("bonus_percentage must be within [0, 100]")
         return violations
 
     def to_dict(self) -> Dict[str, Any]:
@@ -489,6 +598,8 @@ class MonetaryConstraints:
             "min_bonus_amount": self.min_bonus_amount,
             "max_bonus_amount": self.max_bonus_amount,
             "max_conversion_amount": self.max_conversion_amount,
+            "bonus_percentage": self.bonus_percentage,
+            "excluded_payment_methods": list(self.excluded_payment_methods),
             "currency": self.currency,
         }
 
@@ -507,6 +618,10 @@ class MonetaryConstraints:
             min_bonus_amount=_coerce_opt_float(data.get("min_bonus_amount")),
             max_bonus_amount=_coerce_opt_float(data.get("max_bonus_amount")),
             max_conversion_amount=_coerce_opt_float(data.get("max_conversion_amount")),
+            bonus_percentage=_coerce_opt_float(data.get("bonus_percentage")),
+            excluded_payment_methods=_coerce_str_list(
+                data.get("excluded_payment_methods")
+            ),
             currency=SafePayloadUtils.coerce_str(data.get("currency")),
         )
 
@@ -522,7 +637,8 @@ class Promotion:
     target_domain: str
     promotion_type: PromotionType
     title: str
-    promotion_id: str = field(default_factory=lambda: hashlib.sha256(f"{uuid.uuid4().hex}{datetime.now().isoformat()}".encode()).hexdigest())
+    promotion_id: Optional[str] = None
+    promo_code: Optional[str] = None
     wagering: Optional[WageringRequirement] = None
     temporal: Optional[TemporalValidity] = None
     monetary: Optional[MonetaryConstraints] = None
@@ -535,8 +651,6 @@ class Promotion:
             raise ValueError("Promotion.target_domain must be a non-empty string")
         if not isinstance(self.title, str) or not self.title.strip():
             raise ValueError("Promotion.title must be a non-empty string")
-        if not isinstance(self.promotion_id, str) or not self.promotion_id.strip():
-            raise ValueError("Promotion.promotion_id must be a non-empty string")
         self.promotion_type = _coerce_enum(self.promotion_type, PromotionType)
         self.verification_state = _coerce_enum(
             self.verification_state, VerificationState
@@ -555,7 +669,17 @@ class Promotion:
             }[label]
             if value is not None and not isinstance(value, expected):
                 raise TypeError(f"Promotion.{label} must be a {expected.__name__}")
+        self.promo_code = SafePayloadUtils.coerce_str(self.promo_code)
         self.notes = SafePayloadUtils.coerce_str(self.notes)
+        if not isinstance(self.promotion_id, str) or not self.promotion_id.strip():
+            source_url = (
+                self.provenance.source_url
+                if isinstance(self.provenance, SourceProvenance)
+                else None
+            )
+            self.promotion_id = _derive_promotion_id(
+                self.target_domain, self.promotion_type, self.title, source_url
+            )
 
     def validate_invariants(self) -> List[str]:
         """Aggregate invariant violations across all nested structures."""
@@ -595,6 +719,7 @@ class Promotion:
             "target_domain": self.target_domain,
             "promotion_type": self.promotion_type.value,
             "title": self.title,
+            "promo_code": self.promo_code,
             "wagering": self.wagering.to_dict() if self.wagering else None,
             "temporal": self.temporal.to_dict() if self.temporal else None,
             "monetary": self.monetary.to_dict() if self.monetary else None,
@@ -623,8 +748,8 @@ class Promotion:
             target_domain=target_domain,
             promotion_type=promotion_type,
             title=title,
-            promotion_id=SafePayloadUtils.coerce_str(data.get("promotion_id"))
-            or hashlib.sha256(f"{uuid.uuid4().hex}{datetime.now().isoformat()}".encode()).hexdigest(),
+            promotion_id=SafePayloadUtils.coerce_str(data.get("promotion_id")),
+            promo_code=SafePayloadUtils.coerce_str(data.get("promo_code")),
             wagering=WageringRequirement.from_dict(raw_wagering)
             if isinstance(raw_wagering, dict)
             else None,

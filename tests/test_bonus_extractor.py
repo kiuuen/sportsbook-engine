@@ -21,6 +21,7 @@ from pytz import UTC
 from bonus_engine.extractor import (
     ExtractionConfig,
     ExtractionError,
+    NonRetryableExtractionError,
     PromotionExtractor,
     TransportCallable,
 )
@@ -224,7 +225,11 @@ def build_campaign(
             "currency": "EUR",
         }
     if evidence is None:
-        evidence = make_citations(("rollover_multiplier",))
+        evidence = make_citations(E2E_CITED_FIELDS)
+    serialized_evidence = [
+        item.to_dict() if isinstance(item, EvidenceCitation) else item
+        for item in (evidence or [])
+    ]
     return {
         "promotion_type": promotion_type.value
         if isinstance(promotion_type, PromotionType)
@@ -234,7 +239,7 @@ def build_campaign(
         "wagering": wagering,
         "temporal": temporal,
         "monetary": monetary,
-        "evidence": evidence,
+        "evidence": serialized_evidence,
     }
 
 
@@ -1239,7 +1244,7 @@ class TestPromotionExtractorProviderCompatibility:
     ):
         transport = ScriptedTransport([(403, "forbidden")])
         extractor = PromotionExtractor(config, transport=transport)
-        with pytest.raises(ExtractionError):
+        with pytest.raises(NonRetryableExtractionError):
             extractor.extract_promotions(
                 E2E_SOURCE_TEXT,
                 target_domain="example.com",

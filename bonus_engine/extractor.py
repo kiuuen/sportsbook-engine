@@ -32,7 +32,7 @@ from .models import (
 from .scanner import ScanEvaluation
 from .validator import InvariantValidator
 
-__all__ = ["ExtractionConfig", "ExtractionError", "PromotionExtractor"]
+__all__ = ["ExtractionConfig", "ExtractionError", "NonRetryableExtractionError", "PromotionExtractor"]
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,9 @@ TransportCallable = Callable[[str, Dict[str, str], bytes, float], Tuple[int, str
 
 class ExtractionError(RuntimeError):
     """Raised when the LLM interaction cannot produce a usable response."""
+
+class NonRetryableExtractionError(ExtractionError):
+    """Raised when the LLM endpoint returns a permanently failing response."""
 
 @dataclass
 class ExtractionConfig:
@@ -320,7 +323,7 @@ class PromotionExtractor:
             if status == 200:
                 return response_text
             last_error = f"HTTP status {status}"
-            if 400 <= status < 500 and use_response_format:
+            if status == 400 and use_response_format:
                 use_response_format = False
                 logger.warning(
                     "Endpoint rejected the strict response_format option "
@@ -339,7 +342,7 @@ class PromotionExtractor:
                     time.sleep(delay)
                     continue
                 break
-            raise ExtractionError(f"Non-retryable LLM failure ({last_error})")
+            raise NonRetryableExtractionError(f"Non-retryable LLM failure ({last_error})")
         raise ExtractionError(f"LLM extraction failed after retries: {last_error}")
 
     @staticmethod
@@ -548,6 +551,8 @@ class PromotionExtractor:
         evidence_source = raw_content if raw_content is not None else candidate_text
         try:
             response_text = self._invoke_llm(candidate_text)
+        except NonRetryableExtractionError:
+            raise
         except ExtractionError as err:
             logger.error("LLM extraction aborted: %s", err)
             return []
@@ -581,13 +586,14 @@ class PromotionExtractor:
         """
         if not isinstance(evaluations, (list, tuple)):
             raise TypeError("evaluations must be a list of ScanEvaluation instances")
-        promotions: List[Promotion] = []
         for index, evaluation in enumerate(evaluations):
             if not isinstance(evaluation, ScanEvaluation):
                 raise TypeError(
                     f"evaluations must contain ScanEvaluation instances; "
                     f"item {index} is {type(evaluation).__name__}"
                 )
+        promotions: List[Promotion] = []
+        for evaluation in evaluations:
             if not evaluation.is_viable or not evaluation.candidate_window:
                 continue
             promotions.extend(

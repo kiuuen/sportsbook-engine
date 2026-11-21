@@ -251,6 +251,7 @@ class InvariantValidator:
 
         if (
             wagering.rollover_multiplier is not None
+            and wagering.rollover_multiplier > 0
             and wagering.calculation_base == CalculationBase.UNSPECIFIED
         ):
             codes.append(DiscrepancyCode.CALCULATION_BASE_AMBIGUOUS)

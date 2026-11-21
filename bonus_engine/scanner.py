@@ -13,10 +13,6 @@ disclaimers) never produce a full-document window; `candidate_window` is the
 densest cluster (most occurrences, earliest, then shortest on ties) and
 `candidate_windows` lists every cluster window in document order.
 
-Additionally, this module classifies URLs by route segments, penalizes stale
-years and expired dates, checks for operational-equation co-occurrence
-proximity, and flags grey-zone content.
-
 Raises:
     FileNotFoundError: If the lexicon file does not exist.
     ValueError: If the file is not valid JSON or its root is not an object.
@@ -30,59 +26,11 @@ import pathlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import urlparse
 
 __all__ = ["PromoLexiconLoader", "PromotionScanner", "ScanEvaluation"]
 
 logger = logging.getLogger(__name__)
-
-_CURRENT_YEAR: int = date.today().year
-
-_EDITORIAL_ROUTE_SEGMENTS: Tuple[str, ...] = (
-    "blog", "news", "guide", "guides", "faq", "faqs", "glossary",
-    "help", "support", "about", "contact", "article", "articles",
-    "tips", "strategy", "strategies", "how-to", "wiki", "academy",
-    "learn", "editorial", "press", "review", "reviews",
-)
-
-_PROMOTIONAL_ROUTE_SEGMENTS: Tuple[str, ...] = (
-    "bonus", "bonuses", "promo", "promos", "promotion", "promotions",
-    "offer", "offers", "welcome", "freebet", "free-bet", "freebets",
-    "free-bets", "deal", "deals", "rewards", "vip", "cashback",
-    "signup", "sign-up",
-)
-
-_ACTION_TRIGGERS: Tuple[str, ...] = (
-    "deposit", "bet", "wager", "stake", "claim", "register",
-    "sign up", "opt in", "opt-in", "place", "qualify", "redeem",
-)
-
-_CURRENCY_PATTERN = re.compile(
-    r"(?:[$€£]|\b(?:usd|eur|gbp)\b)\s?\d+"
-    r"|\b\d+(?:[.,]\d+)?\s?(?:usd|eur|gbp)\b"
-    r"|\b\d+(?:[.,]\d+)?\s?%",
-    re.IGNORECASE,
-)
-
-_MULTIPLIER_ODDS_PATTERN = re.compile(
-    r"(?<!\w)\d+(?:\.\d+)?\s?[x×](?!\w)"
-    r"|\bodds\b"
-    r"|(?<!\d)[+-]\d{3,}(?!\d)",
-    re.IGNORECASE,
-)
-
-_MONTH_NAMES: Dict[str, int] = {
-    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
-    "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
-    "november": 11, "december": 12, "jan": 1, "feb": 2, "mar": 3,
-    "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
-    "oct": 10, "nov": 11, "dec": 12,
-}
-_MONTH_NAME_ALTERNATION: str = "|".join(
-    sorted(_MONTH_NAMES, key=len, reverse=True)
-)
 
 def _normalize_text(text: str) -> str:
     """Casefold and strip combining diacritics from a string.
@@ -206,16 +154,6 @@ class ScanEvaluation:
     window_word_count: int
     word_count: int
     source_text_length: int
-    url: Optional[str] = None
-    url_penalty: float = 0.0
-    url_bonus: float = 0.0
-    url_disqualifiers: List[str] = field(default_factory=list)
-    temporal_penalty: float = 0.0
-    temporal_disqualifiers: List[str] = field(default_factory=list)
-    operational_signal_types: List[str] = field(default_factory=list)
-    operational_cooccurrence_ratio: float = 0.0
-    has_operational_structure: bool = False
-    is_grey_zone: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Export a JSON-safe dictionary representation."""
@@ -233,16 +171,6 @@ class ScanEvaluation:
             "window_word_count": self.window_word_count,
             "word_count": self.word_count,
             "source_text_length": self.source_text_length,
-            "url": self.url,
-            "url_penalty": self.url_penalty,
-            "url_bonus": self.url_bonus,
-            "url_disqualifiers": list(self.url_disqualifiers),
-            "temporal_penalty": self.temporal_penalty,
-            "temporal_disqualifiers": list(self.temporal_disqualifiers),
-            "operational_signal_types": list(self.operational_signal_types),
-            "operational_cooccurrence_ratio": self.operational_cooccurrence_ratio,
-            "has_operational_structure": self.has_operational_structure,
-            "is_grey_zone": self.is_grey_zone,
         }
 
 class PromotionScanner:
@@ -252,10 +180,6 @@ class PromotionScanner:
     vocabulary minus noise penalties, detects casino-dominant content,
     and decides whether a payload carries enough operational wagering
     signals to justify downstream LLM extraction.
-
-    Additionally, this module classifies URLs by route segments, penalizes stale
-    years and expired dates, checks for operational-equation co-occurrence
-    proximity, and flags grey-zone content.
 
     Args:
         lexicon: Optional pre-loaded lexicon; a default loader backed by
@@ -271,21 +195,7 @@ class PromotionScanner:
             match spans for them to belong to the same candidate cluster.
         density_normalizer_words: Word count at which one positive hit
             represents full signal density.
-        url_penalty_factor: Weight applied to each editorial route segment.
-        url_bonus_factor: Weight applied to each promotional route segment.
-        stale_year_penalty: Weight applied to each obsolete year.
-        expired_date_penalty: Weight applied to each expired date.
-        operational_proximity_chars: Maximum gap in characters between positive
-            match spans and operational signals for them to be considered
-            co-occurring.
-        grey_zone_min_operational_signals: Minimum distinct operational signal
-            types required to flag a grey zone.
     """
-
-    _ACTION_TRIGGER_PATTERN = re.compile(
-        r"(?<!\w)(?:" + "|".join(re.escape(t) for t in _ACTION_TRIGGERS) + r")(?!\w)",
-        re.IGNORECASE,
-    )
 
     def __init__(
         self,
@@ -299,12 +209,6 @@ class PromotionScanner:
         window_context_chars: int = 120,
         max_cluster_gap_chars: int = 240,
         density_normalizer_words: float = 40.0,
-        url_penalty_factor: float = 0.15,
-        url_bonus_factor: float = 0.05,
-        stale_year_penalty: float = 0.25,
-        expired_date_penalty: float = 0.35,
-        operational_proximity_chars: int = 160,
-        grey_zone_min_operational_signals: int = 2,
     ) -> None:
         if not isinstance(viability_threshold, (int, float)):
             raise TypeError("viability_threshold must be a number")
@@ -315,21 +219,14 @@ class PromotionScanner:
             "min_positive_terms",
             "window_context_chars",
             "max_cluster_gap_chars",
-            "operational_proximity_chars",
         ):
             value = locals()[name]
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        if not isinstance(grey_zone_min_operational_signals, int) or grey_zone_min_operational_signals < 0:
-            raise ValueError("grey_zone_min_operational_signals must be a non-negative integer")
         for name in (
             "noise_penalty_factor",
             "casino_penalty_factor",
             "density_normalizer_words",
-            "url_penalty_factor",
-            "url_bonus_factor",
-            "stale_year_penalty",
-            "expired_date_penalty",
         ):
             value = locals()[name]
             if not isinstance(value, (int, float)) or value <= 0:
@@ -345,12 +242,6 @@ class PromotionScanner:
         self._window_context_chars = window_context_chars
         self._max_cluster_gap_chars = max_cluster_gap_chars
         self._density_normalizer_words = float(density_normalizer_words)
-        self._url_penalty_factor = float(url_penalty_factor)
-        self._url_bonus_factor = float(url_bonus_factor)
-        self._stale_year_penalty = float(stale_year_penalty)
-        self._expired_date_penalty = float(expired_date_penalty)
-        self._operational_proximity_chars = operational_proximity_chars
-        self._grey_zone_min_operational_signals = grey_zone_min_operational_signals
 
     @staticmethod
     def _collect_matches(
@@ -413,167 +304,11 @@ class PromotionScanner:
         window_end = min(len(text), end + context_chars)
         return text[window_start:window_end].strip()
 
-    @staticmethod
-    def _classify_url(
-        url: Optional[str],
-    ) -> Tuple[float, float, List[str]]:
-        """Count editorial vs promotional route segments in a URL path.
-
-        Returns ``(editorial_hits, promotional_hits, disqualifiers)``.
-        Malformed URLs yield ``(0.0, 0.0, ["malformed_url"])``.
-        """
-        if url is None:
-            return 0.0, 0.0, []
-        if not isinstance(url, str):
-            raise TypeError("url must be a string or None")
-        if not url.strip():
-            return 0.0, 0.0, []
-        try:
-            path = urlparse(url).path or ""
-        except ValueError:
-            return 0.0, 0.0, ["malformed_url"]
-        segments = [seg for seg in path.lower().split("/") if seg]
-        editorial_hits = sum(
-            1
-            for seg in segments
-            if any(term in seg for term in _EDITORIAL_ROUTE_SEGMENTS)
-        )
-        promotional_hits = sum(
-            1
-            for seg in segments
-            if any(term in seg for term in _PROMOTIONAL_ROUTE_SEGMENTS)
-        )
-        disqualifiers: List[str] = []
-        if editorial_hits and not promotional_hits:
-            disqualifiers.append("editorial_route")
-        return float(editorial_hits), float(promotional_hits), disqualifiers
-
-    @staticmethod
-    def _parse_text_dates(text: str) -> List[date]:
-        """Extract concrete calendar dates from text (ISO, numeric, textual)."""
-        found: List[date] = []
-        for match in re.finditer(r"(?<!\d)(20\d{2})-(\d{1,2})-(\d{1,2})(?!\d)", text):
-            try:
-                found.append(
-                    date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-                )
-            except ValueError:
-                continue
-        for match in re.finditer(
-            r"(?<!\d)(\d{1,2})[/.-](\d{1,2})[/.-](20\d{2})(?!\d)", text
-        ):
-            first, second, year = (
-                int(match.group(1)),
-                int(match.group(2)),
-                int(match.group(3)),
-            )
-            for day, month in ((first, second), (second, first)):
-                try:
-                    found.append(date(year, month, day))
-                    break
-                except ValueError:
-                    continue
-        for pattern, day_group, month_group, year_group in (
-            (
-                rf"(?i)(?<!\w)({_MONTH_NAME_ALTERNATION})\w*\.?\s+"
-                r"(\d{1,2}),?\s+(20\d{2})(?!\d)",
-                2, 1, 3,
-            ),
-            (
-                rf"(?i)(?<!\d)(\d{{1,2}})\s+({_MONTH_NAME_ALTERNATION})\w*\.?,?"
-                r"\s+(20\d{2})(?!\d)",
-                1, 2, 3,
-            ),
-        ):
-            for match in re.finditer(pattern, text):
-                month = _MONTH_NAMES.get(match.group(month_group).lower())
-                if month is None:
-                    continue
-                try:
-                    found.append(
-                        date(
-                            int(match.group(year_group)),
-                            month,
-                            int(match.group(day_group)),
-                        )
-                    )
-                except ValueError:
-                    continue
-        return found
-
-    def _detect_temporal_staleness(
-        self, text: str
-    ) -> Tuple[float, List[str]]:
-        """Penalize obsolete years and already-expired explicit dates."""
-        disqualifiers: List[str] = []
-        penalty = 0.0
-        years = [int(y) for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", text)]
-        if any(year < _CURRENT_YEAR for year in years):
-            disqualifiers.append("obsolete_year")
-            penalty += self._stale_year_penalty
-        today = date.today()
-        for parsed in self._parse_text_dates(text):
-            if parsed < today:
-                disqualifiers.append("expired_date")
-                penalty += self._expired_date_penalty
-                break
-        return round(penalty, 4), disqualifiers
-
-    def _evaluate_operational_structure(
-        self,
-        normalized: str,
-        index_map: List[int],
-        positive_spans: List[Tuple[int, int]],
-    ) -> Tuple[bool, float, List[str]]:
-        """Check proximity co-occurrence of promo terms with operational signals.
-
-        Returns ``(has_structure, cooccurrence_ratio, signal_types)`` where
-        ``has_structure`` requires at least
-        ``grey_zone_min_operational_signals`` distinct signal types and at
-        least one positive span co-occurring within
-        ``operational_proximity_chars`` of an operational signal.
-        """
-        signal_spans: Dict[str, List[Tuple[int, int]]] = {}
-        for name, pattern in (
-            ("action_trigger", self._ACTION_TRIGGER_PATTERN),
-            ("amount_or_percentage", _CURRENCY_PATTERN),
-            ("multiplier_or_odds", _MULTIPLIER_ODDS_PATTERN),
-        ):
-            spans = [
-                (index_map[found.start()], index_map[found.end() - 1] + 1)
-                for found in pattern.finditer(normalized)
-            ]
-            if spans:
-                signal_spans[name] = spans
-        if not signal_spans or not positive_spans:
-            return False, 0.0, []
-        proximity = self._operational_proximity_chars
-        cooccurring = 0
-        for pos_start, pos_end in positive_spans:
-            near = any(
-                s_start <= pos_end and s_end >= pos_start
-                or abs(s_end - pos_start) <= proximity
-                or abs(pos_end - s_start) <= proximity
-                for spans in signal_spans.values()
-                for s_start, s_end in spans
-            )
-            if near:
-                cooccurring += 1
-        ratio = cooccurring / len(positive_spans)
-        has_structure = (
-            len(signal_spans) >= self._grey_zone_min_operational_signals
-            and cooccurring > 0
-        )
-        return has_structure, round(ratio, 4), sorted(signal_spans)
-
-    def evaluate_text(
-        self, text: Optional[str], url: Optional[str] = None
-    ) -> ScanEvaluation:
+    def evaluate_text(self, text: Optional[str]) -> ScanEvaluation:
         """Evaluate a single text payload and return a structured outcome.
 
         Raises:
             TypeError: If ``text`` is neither a string nor ``None``.
-            TypeError: If ``url`` is neither a string nor ``None``.
         """
         if text is None:
             text = ""
@@ -644,45 +379,14 @@ class PromotionScanner:
         )
         total_weight = positive_weight + noise_weight
         purity = positive_weight / total_weight if total_weight > 0 else 0.0
-        base_score = round(
+        relevance_score = round(
             max(0.0, min(1.0, purity * min(1.0, density))), 4
         )
-
-        evaluation_text = candidate_window if candidate_window else text
-        url_editorial, url_promotional, url_disqualifiers = self._classify_url(url)
-        url_penalty = self._url_penalty_factor * url_editorial
-        url_bonus = (
-            self._url_bonus_factor * url_promotional
-            if url_promotional and not url_editorial
-            else 0.0
-        )
-        temporal_penalty, temporal_disqualifiers = self._detect_temporal_staleness(
-            evaluation_text
-        )
-        has_operational_structure, ops_ratio, ops_types = (
-            self._evaluate_operational_structure(
-                normalized, index_map, positive_spans
-            )
-        )
-
-        relevance_score = round(
-            max(
-                0.0,
-                min(1.0, base_score - url_penalty - temporal_penalty + url_bonus),
-            ),
-            4,
-        )
-        disqualifiers.extend(url_disqualifiers)
-        disqualifiers.extend(temporal_disqualifiers)
         is_viable = not disqualifiers and relevance_score >= self._viability_threshold
-        is_grey_zone = (
-            has_operational_structure
-            and not is_viable
-            and "casino_dominant" not in disqualifiers
-            and relevance_score < self._viability_threshold
-        )
         matched_noise_terms = [
-            term for terms in noise_matches.values() for term in terms
+            term
+            for terms in noise_matches.values()
+            for term in terms
         ]
         return ScanEvaluation(
             relevance_score=relevance_score,
@@ -695,35 +399,18 @@ class PromotionScanner:
             window_word_count=window_word_count,
             word_count=word_count,
             source_text_length=len(text),
-            url=url,
-            url_penalty=round(url_penalty, 4),
-            url_bonus=round(url_bonus, 4),
-            url_disqualifiers=url_disqualifiers,
-            temporal_penalty=temporal_penalty,
-            temporal_disqualifiers=temporal_disqualifiers,
-            operational_signal_types=ops_types,
-            operational_cooccurrence_ratio=ops_ratio,
-            has_operational_structure=has_operational_structure,
-            is_grey_zone=is_grey_zone,
         )
 
     def evaluate_chunks(
-        self,
-        chunks: List[str],
-        urls: Optional[List[Optional[str]]] = None,
+        self, chunks: List[str]
     ) -> List[ScanEvaluation]:
         """Evaluate a batch of text chunks, preserving input order.
 
         Raises:
             TypeError: If ``chunks`` is not a list/tuple of strings.
-            ValueError: If ``urls`` is provided with a mismatched length.
         """
         if not isinstance(chunks, (list, tuple)):
             raise TypeError("evaluate_chunks expects a list of strings")
-        if urls is not None and not isinstance(urls, (list, tuple)):
-            raise TypeError("urls must be a list of strings or None")
-        if urls is not None and len(urls) != len(chunks):
-            raise ValueError("urls must match the length of chunks")
         evaluations: List[ScanEvaluation] = []
         for index, chunk in enumerate(chunks):
             if not isinstance(chunk, str):
@@ -731,6 +418,5 @@ class PromotionScanner:
                     f"evaluate_chunks expects strings; item {index} is "
                     f"{type(chunk).__name__}"
                 )
-            chunk_url = urls[index] if urls is not None else None
-            evaluations.append(self.evaluate_text(chunk, chunk_url))
+            evaluations.append(self.evaluate_text(chunk))
         return evaluations

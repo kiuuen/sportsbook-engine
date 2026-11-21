@@ -28,6 +28,7 @@ from bonus_engine.models import (
     SourceProvenance,
     TargetAcquisitionState,
     VerificationState,
+    find_transition_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,13 +110,13 @@ class BonusDatabaseManager:
 
     def _init_db(self) -> None:
         with self._transaction() as conn:
-            conn.execute("""
+            conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS bonus_targets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     domain TEXT UNIQUE NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    acquisition_state TEXT NOT NULL DEFAULT 'discovered'
+                    acquisition_state TEXT NOT NULL DEFAULT '{TargetAcquisitionState.DISCOVERED.value}'
                 );
             """)
             conn.execute("""
@@ -177,14 +178,39 @@ class BonusDatabaseManager:
 
     @staticmethod
     def _migrate_schema(conn: sqlite3.Connection) -> None:
-        """Idempotently add acquisition tracking columns to pre-existing databases."""
+        """Idempotently align acquisition tracking with canonical enum values.
+
+        Adds the ``acquisition_state`` column to pre-existing databases using
+        the canonical default, and rewrites any persisted value outside the
+        ``TargetAcquisitionState`` vocabulary so state deserialization never
+        fails on legacy rows.
+        """
         existing_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(bonus_targets)")
         }
+        default_state = TargetAcquisitionState.DISCOVERED.value
         if "acquisition_state" not in existing_columns:
+            # SQLite does not accept bound parameters in ALTER TABLE; the
+            # interpolated value is the validated enum identifier, never
+            # user input.
             conn.execute(
                 "ALTER TABLE bonus_targets "
-                "ADD COLUMN acquisition_state TEXT NOT NULL DEFAULT 'active';"
+                f"ADD COLUMN acquisition_state TEXT NOT NULL DEFAULT '{default_state}';"
+            )
+        valid_states = tuple(state.value for state in TargetAcquisitionState)
+        placeholders = ", ".join("?" for _ in valid_states)
+        cursor = conn.execute(
+            "UPDATE bonus_targets SET acquisition_state = ? "
+            f"WHERE acquisition_state IS NULL "
+            f"OR acquisition_state NOT IN ({placeholders})",
+            (default_state, *valid_states),
+        )
+        if cursor.rowcount:
+            logger.warning(
+                "[BONUS_DB] Normalized %d bonus_targets row(s) with invalid "
+                "acquisition_state to '%s'",
+                cursor.rowcount,
+                default_state,
             )
 
     @staticmethod
@@ -780,9 +806,9 @@ class BonusDatabaseManager:
 
         Adjustment keys are validated dynamically against the serialized
         ``Promotion`` fields (no hardcoded field vocabulary). The promotion
-        is transitioned to ``OPERATOR_CONFIRMED`` — routing through
-        ``INVARIANT_VALIDATED`` when still ``EXTRACTED`` — within the same
-        atomic transaction.
+        is routed to ``OPERATOR_CONFIRMED`` along the shortest legal transition
+        path computed from the canonical state machine (empty path when already
+        confirmed) within the same atomic transaction.
         """
         if not isinstance(promotion_id, str) or not promotion_id.strip():
             raise ValueError("promotion_id must be a non-empty string")
@@ -806,9 +832,10 @@ class BonusDatabaseManager:
             if isinstance(operator_note, str) and operator_note.strip():
                 merged["notes"] = operator_note.strip()
             adjusted = Promotion.from_dict(merged)
-            if adjusted.verification_state == VerificationState.EXTRACTED:
-                adjusted.transition_to(VerificationState.INVARIANT_VALIDATED)
-            adjusted.transition_to(VerificationState.OPERATOR_CONFIRMED)
+            for step in find_transition_path(
+                adjusted.verification_state, VerificationState.OPERATOR_CONFIRMED
+            ):
+                adjusted.transition_to(step)
             conn.execute(
                 """
                 UPDATE promotions

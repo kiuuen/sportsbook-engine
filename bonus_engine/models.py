@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from odds_normalizer.utils import SafePayloadUtils
 
@@ -28,6 +29,7 @@ __all__ = [
     "EvidenceCitation",
     "SourceProvenance",
     "Promotion",
+    "find_transition_path",
 ]
 
 _E = TypeVar("_E", bound=Enum)
@@ -135,6 +137,47 @@ _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
     ),
 }
 
+def find_transition_path(
+    current: Union[VerificationState, str],
+    target: Union[VerificationState, str],
+) -> Tuple[VerificationState, ...]:
+    """Compute a shortest legal transition sequence between lifecycle states.
+
+    Performs a breadth-first search over the canonical ``_ALLOWED_TRANSITIONS``
+    graph so callers never hardcode routing knowledge that can drift from the
+    state machine.
+
+    Returns:
+        The ordered sequence of states to traverse (excluding the starting
+        state, including the target); empty when both arguments resolve to
+        the same state.
+
+    Raises:
+        TypeError: If either argument is neither a ``VerificationState`` nor
+            a string.
+        ValueError: If either argument is not a valid ``VerificationState``
+            value, or no legal path exists between the two states.
+    """
+    current_state = _coerce_enum(current, VerificationState)
+    target_state = _coerce_enum(target, VerificationState)
+    if current_state == target_state:
+        return ()
+    visited = {current_state}
+    queue: Deque[Tuple[VerificationState, Tuple[VerificationState, ...]]] = deque(
+        [(current_state, ())]
+    )
+    while queue:
+        state, path = queue.popleft()
+        for successor in _ALLOWED_TRANSITIONS.get(state, frozenset()):
+            if successor == target_state:
+                return path + (successor,)
+            if successor not in visited:
+                visited.add(successor)
+                queue.append((successor, path + (successor,)))
+    raise ValueError(
+        f"No legal lifecycle transition path from "
+        f"{current_state.value!r} to {target_state.value!r}"
+    )
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
     """Defensively parse an ISO-8601 datetime, returning ``None`` on failure."""

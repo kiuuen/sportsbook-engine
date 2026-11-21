@@ -50,6 +50,7 @@ class DiscrepancyCode(str, Enum):
     MISSING_EVIDENCE_CITATION = "missing_evidence_citation"
     STRUCTURAL_INVARIANT_VIOLATION = "structural_invariant_violation"
     EVIDENCE_QUOTE_UNVERIFIED = "evidence_quote_unverified"
+    BONUS_PERCENTAGE_IMPLAUSIBLE = "bonus_percentage_implausible"
 
 @dataclass
 class ValidationReport:
@@ -83,6 +84,8 @@ class InvariantValidator:
         max_plausible_accumulator_legs: Highest plausible accumulator leg count.
         max_temporal_window_days: Longest plausible validity window in days.
         max_wagering_deadline_days: Longest plausible wagering deadline in days.
+        min_plausible_bonus_percentage: Lowest plausible bonus match percentage.
+        max_plausible_bonus_percentage: Highest plausible bonus match percentage.
     """
 
     _WAGERING_NUMERIC_FIELDS: Tuple[str, ...] = (
@@ -100,6 +103,7 @@ class InvariantValidator:
         "min_bonus_amount",
         "max_bonus_amount",
         "max_conversion_amount",
+        "bonus_percentage",
     )
 
     def __init__(
@@ -114,6 +118,8 @@ class InvariantValidator:
         max_plausible_accumulator_legs: int = 20,
         max_temporal_window_days: int = 365,
         max_wagering_deadline_days: int = 365,
+        min_plausible_bonus_percentage: float = 1.0,
+        max_plausible_bonus_percentage: float = 100.0,
     ) -> None:
         numeric_params = (
             ("min_sports_rollover", min_sports_rollover),
@@ -122,6 +128,8 @@ class InvariantValidator:
             ("min_plausible_selection_odds", min_plausible_selection_odds),
             ("max_plausible_selection_odds", max_plausible_selection_odds),
             ("max_plausible_accumulator_odds", max_plausible_accumulator_odds),
+            ("min_plausible_bonus_percentage", min_plausible_bonus_percentage),
+            ("max_plausible_bonus_percentage", max_plausible_bonus_percentage),
         )
         for name, value in numeric_params:
             if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -143,6 +151,11 @@ class InvariantValidator:
             raise ValueError(
                 "casino_rollover_threshold must be >= max_sports_rollover"
             )
+        if max_plausible_bonus_percentage < min_plausible_bonus_percentage:
+            raise ValueError(
+                "max_plausible_bonus_percentage must be >= "
+                "min_plausible_bonus_percentage"
+            )
         self._min_sports_rollover = float(min_sports_rollover)
         self._max_sports_rollover = float(max_sports_rollover)
         self._casino_rollover_threshold = float(casino_rollover_threshold)
@@ -152,6 +165,8 @@ class InvariantValidator:
         self._max_plausible_accumulator_legs = max_plausible_accumulator_legs
         self._max_temporal_window_days = max_temporal_window_days
         self._max_wagering_deadline_days = max_wagering_deadline_days
+        self._min_plausible_bonus_percentage = float(min_plausible_bonus_percentage)
+        self._max_plausible_bonus_percentage = float(max_plausible_bonus_percentage)
 
     def validate(
         self,
@@ -183,6 +198,8 @@ class InvariantValidator:
             self._audit_wagering(promotion, promotion.wagering, codes, violations)
         if promotion.temporal is not None:
             self._audit_temporal(promotion.temporal, codes, violations)
+        if promotion.monetary is not None:
+            self._audit_monetary(promotion.monetary, codes, violations)
         self._audit_evidence(
             promotion, codes, violations, evidence_gaps, source_text
         )
@@ -312,6 +329,28 @@ class InvariantValidator:
                 f"wagering_deadline_days "
                 f"{temporal.wagering_deadline_days} is outside the plausible "
                 f"range [1, {self._max_wagering_deadline_days}]"
+            )
+
+    def _audit_monetary(
+        self,
+        monetary: MonetaryConstraints,
+        codes: List[DiscrepancyCode],
+        violations: List[str],
+    ) -> None:
+        """Enforce plausibility bounds on monetary valuation metrics."""
+        if (
+            monetary.bonus_percentage is not None
+            and not (
+                self._min_plausible_bonus_percentage
+                <= monetary.bonus_percentage
+                <= self._max_plausible_bonus_percentage
+            )
+        ):
+            codes.append(DiscrepancyCode.BONUS_PERCENTAGE_IMPLAUSIBLE)
+            violations.append(
+                f"bonus_percentage {monetary.bonus_percentage} is outside the "
+                f"plausible range [{self._min_plausible_bonus_percentage}, "
+                f"{self._max_plausible_bonus_percentage}]"
             )
 
     def _audit_evidence(

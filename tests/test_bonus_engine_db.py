@@ -10,8 +10,10 @@ from __future__ import annotations
 import datetime
 import itertools
 import json
+import sqlite3
 import uuid
-from typing import Any, Callable, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
@@ -23,6 +25,7 @@ from bonus_engine.models import (
     Promotion,
     PromotionType,
     SourceProvenance,
+    TargetAcquisitionState,
     TemporalValidity,
     VerificationState,
     WageringRequirement,
@@ -818,3 +821,317 @@ class TestCorruptedPayloads:
             )
         with pytest.raises(ValueError):
             db_manager.get_promotion("list-promotion-id")
+
+class TestTargetAcquisitionState:
+    def test_new_target_defaults_to_discovered(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.ensure_target(TARGET_DOMAIN)
+        assert (
+            db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            == TargetAcquisitionState.DISCOVERED
+        )
+
+    def test_existing_target_keeps_state_on_plain_ensure(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.ensure_target(TARGET_DOMAIN)
+        db_manager.set_target_acquisition_state(
+            TARGET_DOMAIN, TargetAcquisitionState.ACTIVE
+        )
+        db_manager.ensure_target(TARGET_DOMAIN)
+        assert (
+            db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            == TargetAcquisitionState.ACTIVE
+        )
+
+    def test_explicit_state_on_ensure_overrides_persisted(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.ensure_target(TARGET_DOMAIN)
+        db_manager.ensure_target(TARGET_DOMAIN, TargetAcquisitionState.SUSPENDED)
+        assert (
+            db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            == TargetAcquisitionState.SUSPENDED
+        )
+
+    def test_set_state_accepts_raw_string(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.ensure_target(TARGET_DOMAIN)
+        db_manager.set_target_acquisition_state(TARGET_DOMAIN, "archived")
+        assert (
+            db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            == TargetAcquisitionState.ARCHIVED
+        )
+
+    def test_unknown_state_string_rejected(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.ensure_target(TARGET_DOMAIN)
+        with pytest.raises(ValueError):
+            db_manager.set_target_acquisition_state(TARGET_DOMAIN, "bogus-state")
+
+    def test_state_query_normalizes_domain(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.ensure_target("  Mixed-Case.EXAMPLE ")
+        assert (
+            db_manager.get_target_acquisition_state("mixed-case.example")
+            == TargetAcquisitionState.DISCOVERED
+        )
+
+    def test_unknown_domain_state_returns_none(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        assert db_manager.get_target_acquisition_state("never-seen.example") is None
+
+    def test_query_by_state_returns_matching_domains(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.set_target_acquisition_state("active-one.example", "active")
+        db_manager.set_target_acquisition_state("active-two.example", "active")
+        db_manager.set_target_acquisition_state("archived-one.example", "archived")
+        active = db_manager.get_targets_by_acquisition_state(TargetAcquisitionState.ACTIVE)
+        assert set(active) == {"active-one.example", "active-two.example"}
+        assert (
+            db_manager.get_targets_by_acquisition_state("suspended") == []
+        )
+
+    def test_blank_domain_rejected_everywhere(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        with pytest.raises(ValueError):
+            db_manager.get_target_acquisition_state("   ")
+        with pytest.raises(ValueError):
+            db_manager.set_target_acquisition_state("  ", "active")
+        with pytest.raises(ValueError):
+            db_manager.get_targets_by_acquisition_state("  ")
+
+class TestLegacySchemaMigration:
+    def _create_legacy_store(self, db_path: Any) -> None:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("""
+                CREATE TABLE bonus_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT UNIQUE NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+            conn.execute(
+                "INSERT INTO bonus_targets (domain, created_at, updated_at) "
+                "VALUES ('legacy.example', '2023-01-01T00:00:00+00:00', "
+                "'2023-01-01T00:00:00+00:00');"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_migration_adds_column_and_preserves_rows(self, tmp_path: Any) -> None:
+        db_path = tmp_path / "legacy.db"
+        self._create_legacy_store(db_path)
+        manager = BonusDatabaseManager(db_path=db_path)
+        try:
+            assert (
+                manager.get_target_acquisition_state("legacy.example")
+                == TargetAcquisitionState.DISCOVERED
+            )
+        finally:
+            manager.close()
+
+    def test_migration_normalizes_invalid_persisted_states(self, tmp_path: Any) -> None:
+        db_path = tmp_path / "legacy-invalid.db"
+        self._create_legacy_store(db_path)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "ALTER TABLE bonus_targets ADD COLUMN acquisition_state TEXT "
+                "NOT NULL DEFAULT 'discovered';"
+            )
+            conn.execute(
+                "UPDATE bonus_targets SET acquisition_state = 'weird-legacy-state' "
+                "WHERE domain = 'legacy.example';"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        manager = BonusDatabaseManager(db_path=db_path)
+        try:
+            assert (
+                manager.get_target_acquisition_state("legacy.example")
+                == TargetAcquisitionState.DISCOVERED
+            )
+        finally:
+            manager.close()
+
+    def test_migrated_store_fully_operational(self, tmp_path: Any) -> None:
+        db_path = tmp_path / "legacy-operational.db"
+        self._create_legacy_store(db_path)
+        manager = BonusDatabaseManager(db_path=db_path)
+        try:
+            manager.set_target_acquisition_state(
+                "legacy.example", TargetAcquisitionState.ACTIVE
+            )
+            manager.ensure_target("fresh.example")
+            assert set(
+                manager.get_targets_by_acquisition_state(TargetAcquisitionState.ACTIVE)
+            ) == {"legacy.example"}
+        finally:
+            manager.close()
+
+class TestSourceRegistryLifecycle:
+    URL_A = "https://tests-bonus-target.example/terms"
+    URL_B = "https://tests-bonus-target.example/promos"
+
+    def test_register_then_list(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A, pinned=True)
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_B)
+        registered = db_manager.get_registered_source_urls(TARGET_DOMAIN)
+        assert [entry["source_url"] for entry in registered] == [self.URL_A, self.URL_B]
+        assert registered[0]["pinned"] is True
+        assert registered[1]["pinned"] is False
+
+    def test_pinned_only_filter(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A, pinned=True)
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_B)
+        pinned = db_manager.get_registered_source_urls(TARGET_DOMAIN, pinned_only=True)
+        assert [entry["source_url"] for entry in pinned] == [self.URL_A]
+
+    def test_repin_existing_url(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A, pinned=False)
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A, pinned=True)
+        registered = db_manager.get_registered_source_urls(TARGET_DOMAIN)
+        assert len(registered) == 1
+        assert registered[0]["pinned"] is True
+
+    def test_unregister_removes_only_targeted_url(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A)
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_B)
+        assert db_manager.unregister_source_url(TARGET_DOMAIN, self.URL_A) is True
+        assert db_manager.unregister_source_url(TARGET_DOMAIN, self.URL_A) is False
+        remaining = db_manager.get_registered_source_urls(TARGET_DOMAIN)
+        assert [entry["source_url"] for entry in remaining] == [self.URL_B]
+
+    def test_record_source_check_updates_metadata(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A)
+        assert (
+            db_manager.record_source_check(
+                TARGET_DOMAIN, self.URL_A, content_hash="abc123"
+            )
+            is True
+        )
+        entry = db_manager.get_registered_source_urls(TARGET_DOMAIN)[0]
+        assert entry["last_content_hash"] == "abc123"
+        assert entry["last_checked_at"] is not None
+
+    def test_record_source_check_preserves_hash_when_omitted(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.register_source_url(TARGET_DOMAIN, self.URL_A)
+        db_manager.record_source_check(TARGET_DOMAIN, self.URL_A, content_hash="keep-me")
+        db_manager.record_source_check(TARGET_DOMAIN, self.URL_A)
+        entry = db_manager.get_registered_source_urls(TARGET_DOMAIN)[0]
+        assert entry["last_content_hash"] == "keep-me"
+
+    def test_record_source_check_unknown_url_returns_false(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        assert (
+            db_manager.record_source_check(TARGET_DOMAIN, "https://unknown.example/x")
+            is False
+        )
+
+    def test_registry_isolated_across_domains(self, db_manager: BonusDatabaseManager) -> None:
+        db_manager.register_source_url("domain-one.example", self.URL_A)
+        db_manager.register_source_url("domain-two.example", self.URL_A)
+        assert len(db_manager.get_registered_source_urls("domain-one.example")) == 1
+        assert db_manager.unregister_source_url("domain-one.example", self.URL_A) is True
+        assert len(db_manager.get_registered_source_urls("domain-two.example")) == 1
+
+    def test_blank_url_rejected(self, db_manager: BonusDatabaseManager) -> None:
+        with pytest.raises(ValueError):
+            db_manager.register_source_url(TARGET_DOMAIN, "   ")
+        with pytest.raises(ValueError):
+            db_manager.unregister_source_url(TARGET_DOMAIN, "")
+        with pytest.raises(ValueError):
+            db_manager.record_source_check(TARGET_DOMAIN, "  ")
+
+class TestConcurrentAccess:
+    def test_concurrent_mixed_reads_and_writes(
+        self, db_manager: BonusDatabaseManager, promotion_factory: Callable[..., Promotion]
+    ) -> None:
+        worker_count = 8
+        promotions_per_worker = 5
+        promotions = [promotion_factory() for _ in range(worker_count * promotions_per_worker)]
+
+        def _worker(worker_index: int) -> List[str]:
+            saved: List[str] = []
+            for index in range(promotions_per_worker):
+                promotion = promotions[worker_index * promotions_per_worker + index]
+                saved.append(db_manager.save_promotion(TARGET_DOMAIN, promotion))
+                # Interleave reads with writes to stress lock handoff.
+                db_manager.get_promotions_by_domain(TARGET_DOMAIN)
+                db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            return saved
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            results = list(executor.map(_worker, range(worker_count)))
+
+        saved_ids = [pid for worker_ids in results for pid in worker_ids]
+        assert len(saved_ids) == worker_count * promotions_per_worker
+        assert len(set(saved_ids)) == len(saved_ids)
+        stored = db_manager.get_promotions_by_domain(TARGET_DOMAIN)
+        assert {p.promotion_id for p in stored} == set(saved_ids)
+
+    def test_concurrent_source_versioning_never_loses_versions(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        url = "https://tests-bonus-target.example/versioned"
+        worker_count = 6
+        snapshots_per_worker = 4
+
+        def _worker(worker_index: int) -> None:
+            for index in range(snapshots_per_worker):
+                db_manager.record_source(
+                    TARGET_DOMAIN,
+                    url,
+                    f"content w{worker_index} v{index}",
+                )
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            list(executor.map(_worker, range(worker_count)))
+
+        versions = db_manager.get_source_versions(TARGET_DOMAIN, url)
+        # Every distinct payload must survive; identical payloads deduplicate,
+        # so the count equals the number of unique payloads submitted.
+        unique_payloads = {
+            f"content w{w} v{i}" for w in range(worker_count) for i in range(snapshots_per_worker)
+        }
+        assert len(versions) == len(unique_payloads)
+        assert versions[0]["version"] == len(versions)
+        assert all(
+            versions[i]["version"] > versions[i + 1]["version"]
+            for i in range(len(versions) - 1)
+        )
+
+    def test_concurrent_transitions_serialize_correctly(
+        self, db_manager: BonusDatabaseManager, promotion_factory: Callable[..., Promotion]
+    ) -> None:
+        promotion = promotion_factory()
+        db_manager.save_promotion(TARGET_DOMAIN, promotion)
+        worker_count = 4
+
+        def _advance(_: int) -> None:
+            try:
+                db_manager.transition_promotion(
+                    promotion.promotion_id, VerificationState.INVARIANT_VALIDATED
+                )
+            except ValueError:
+                # Losing racers hit the illegal-transition guard; the state
+                # machine guarantees exactly one winner persists.
+                pass
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            list(executor.map(_advance, range(worker_count)))
+
+        reloaded = db_manager.get_promotion(promotion.promotion_id)
+        assert reloaded is not None
+        assert reloaded.verification_state == VerificationState.INVARIANT_VALIDATED

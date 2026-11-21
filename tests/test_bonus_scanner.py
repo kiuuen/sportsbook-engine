@@ -2,7 +2,7 @@
 
 Covers :class:`bonus_engine.scanner.PromoLexiconLoader`,
 :class:`bonus_engine.scanner.PromotionScanner`, and
-:class:`bonus_engine.scanner.ScanEvaluation`.
+:class:`bonus_engine.scanner.ScanEvaluation`. Additional classes cover Spanish/bilingual viability, diacritic-insensitive matching with accent-preserving windows, Unicode word counting, and localized span clustering.
 
 Per project conventions, lexicon-driven tests load the repository's real,
 un-truncated ``promo_lexicon.json`` rather than synthetic JSON payloads.
@@ -45,6 +45,31 @@ CASINO_DOMINANT_TEXT: str = (
     "plus a welcome bonus."
 )
 SIGNAL_FREE_TEXT: str = "Great prices await you today."
+SPANISH_VIABLE_PROMO_TEXT: str = (
+    "Bono de bienvenida: realiza un depósito mínimo de 10 € y apuesta "
+    "a cuotas mínimas de 1.80. El bono lleva requisitos de apuesta de "
+    "5x el bono. El bono se convierte en dinero retirable. La oferta "
+    "caduca dentro de 7 días. Se aplican términos."
+)
+SPANISH_CASINO_DOMINANT_TEXT: str = (
+    "Disfruta de giros gratis en tragamonedas y ruleta en nuestro "
+    "casino en línea, además de un bono de bienvenida."
+)
+BILINGUAL_PROMO_TEXT: str = (
+    "Welcome bonus: depósito mínimo de 10 €, apuesta a cuotas mínimas "
+    "de 1.80. Free bet stake not returned. La oferta caduca dentro de "
+    "7 días."
+)
+ACCENTED_SPANISH_TEXT: str = (
+    "Aproveche el bono de bienvenida: depósito mínimo de 10 € y "
+    "apuesta a cuotas mínimas de 1.80. El bono se convierte en dinero "
+    "retirable y la oferta caduca dentro de 7 días."
+)
+UNACCENTED_SPANISH_TEXT: str = (
+    "Aproveche el bono de bienvenida: deposito minimo de 10 € y "
+    "apuesta a cuotas minimas de 1.80. El bono se convierte en dinero "
+    "retirable y la oferta caduce dentro de 7 dias."
+)
 
 
 @pytest.fixture(scope="module")
@@ -64,9 +89,8 @@ class TestPromoLexiconLoader:
 
     def test_default_path_loads_real_lexicon(self) -> None:
         loader = PromoLexiconLoader()
-        assert loader.lexicon_path == pathlib.Path(
-            PromoLexiconLoader.__module__.replace(".", "/")
-        ).with_name("promo_lexicon.json") or loader.lexicon_path.exists()
+        assert loader.lexicon_path.name == "promo_lexicon.json"
+        assert loader.lexicon_path.exists()
         assert loader.positive_terms
         assert loader.noise_terms
 
@@ -220,7 +244,7 @@ class TestPromotionScannerInit:
 
     @pytest.mark.parametrize(
         "param_name",
-        ["min_positive_categories", "min_positive_terms", "window_context_chars"],
+        ["min_positive_categories", "min_positive_terms", "window_context_chars", "max_cluster_gap_chars"],
     )
     @pytest.mark.parametrize(
         "bad_value", [-1, 1.5, "3", None]
@@ -260,6 +284,8 @@ class TestScanEvaluation:
             disqualifiers=["noise_dominant"],
             is_viable=False,
             candidate_window="window text",
+            candidate_windows=["window text", "second window"],
+            window_word_count=6,
             word_count=42,
             source_text_length=300,
         )
@@ -274,6 +300,8 @@ class TestScanEvaluation:
             "disqualifiers",
             "is_viable",
             "candidate_window",
+            "candidate_windows",
+            "window_word_count",
             "word_count",
             "source_text_length",
         }
@@ -286,6 +314,8 @@ class TestScanEvaluation:
         assert exported["disqualifiers"] == ["noise_dominant"]
         assert exported["is_viable"] is False
         assert exported["candidate_window"] == "window text"
+        assert exported["candidate_windows"] == ["window text", "second window"]
+        assert exported["window_word_count"] == 6
         assert exported["word_count"] == 42
         assert exported["source_text_length"] == 300
 
@@ -420,12 +450,34 @@ class TestEvaluateText:
             evaluation = scanner.evaluate_text(text)
             assert 0.0 <= evaluation.relevance_score <= 1.0
 
-    def test_low_density_dilutes_score(
+    def test_diluted_single_signal_blocked_by_insufficient_signals(
         self, scanner: PromotionScanner
     ) -> None:
         diluted_text = "welcome bonus " + "filler " * 500
         evaluation = scanner.evaluate_text(diluted_text)
-        assert 0.0 < evaluation.relevance_score < 0.1
+        assert evaluation.is_viable is False
+        assert "insufficient_signals" in evaluation.disqualifiers
+        # Density is measured over the matched cluster span, not the whole
+        # payload, so the isolated match still saturates the purity/density
+        # product; viability is blocked by the signal-count rules instead.
+        assert evaluation.relevance_score == 1.0
+
+    def test_wide_cluster_dilutes_density_score(
+        self, real_lexicon: PromoLexiconLoader
+    ) -> None:
+        lenient = PromotionScanner(
+            lexicon=real_lexicon,
+            min_positive_categories=1,
+            min_positive_terms=1,
+            max_cluster_gap_chars=5000,
+        )
+        text = "welcome bonus " + "filler " * 400 + "free bet"
+        evaluation = lenient.evaluate_text(text)
+        # One merged cluster of 404 words carrying only 2 positive terms
+        # dilutes density to 2 / (404 / 40) ~= 0.198, below the default
+        # viability threshold, with no disqualifiers attached.
+        assert evaluation.disqualifiers == []
+        assert 0.0 < evaluation.relevance_score < 0.35
         assert evaluation.is_viable is False
 
     def test_word_count_counts_alphanumeric_tokens(
@@ -471,6 +523,7 @@ class TestCandidateWindowExtraction:
         text = "012345678 welcome bonus 012345678"
         evaluation = scanner.evaluate_text(text)
         assert evaluation.candidate_window == text
+        assert evaluation.candidate_windows == [evaluation.candidate_window]
 
     def test_empty_text_yields_empty_window(
         self, scanner: PromotionScanner
@@ -563,3 +616,152 @@ class TestScannerTuning:
             < default_evaluation.relevance_score
         )
         assert heavy_evaluation.relevance_score < 0.05
+
+
+class TestSpanishAndBilingualViability:
+    """Tests for Spanish-language and bilingual promotional evaluation."""
+
+    def test_spanish_promotional_text_is_viable(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(SPANISH_VIABLE_PROMO_TEXT)
+        assert evaluation.is_viable is True
+        assert evaluation.disqualifiers == []
+        assert evaluation.relevance_score >= 0.35
+        assert {
+            "positive_promotion_structures",
+            "positive_qualifying_actions",
+            "positive_odds_constraints",
+            "positive_wagering_requirements",
+            "positive_rollover_mechanics",
+            "positive_temporal_limits",
+        }.issubset(set(evaluation.matched_categories))
+
+    def test_spanish_casino_dominance_disqualifies(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(SPANISH_CASINO_DOMINANT_TEXT)
+        assert "casino_dominant" in evaluation.disqualifiers
+        assert evaluation.is_viable is False
+        assert "giros gratis" in evaluation.matched_noise_terms
+        assert "casino en línea" in evaluation.matched_noise_terms
+
+    def test_bilingual_text_matches_both_languages(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(BILINGUAL_PROMO_TEXT)
+        assert evaluation.is_viable is True
+        assert (
+            "welcome bonus"
+            in evaluation.matched_categories["positive_promotion_structures"]
+        )
+        assert (
+            "free bet"
+            in evaluation.matched_categories["positive_promotion_structures"]
+        )
+        assert (
+            "depósito mínimo"
+            in evaluation.matched_categories["positive_qualifying_actions"]
+        )
+        assert (
+            "cuotas mínimas"
+            in evaluation.matched_categories["positive_odds_constraints"]
+        )
+        assert (
+            "caduca" in evaluation.matched_categories["positive_temporal_limits"]
+        )
+
+
+class TestDiacriticInsensitiveMatching:
+    """Tests for accent-insensitive matching and window text preservation."""
+
+    def test_accented_source_matches_and_window_preserves_accents(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(ACCENTED_SPANISH_TEXT)
+        assert evaluation.is_viable is True
+        assert (
+            "depósito mínimo"
+            in evaluation.matched_categories["positive_qualifying_actions"]
+        )
+        assert "depósito mínimo" in evaluation.candidate_window
+        assert any(
+            "depósito mínimo" in window
+            for window in evaluation.candidate_windows
+        )
+
+    def test_unaccented_source_matches_accented_lexicon_terms(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(UNACCENTED_SPANISH_TEXT)
+        assert evaluation.is_viable is True
+        # The reported terms are always the accented lexicon forms.
+        assert (
+            "depósito mínimo"
+            in evaluation.matched_categories["positive_qualifying_actions"]
+        )
+        assert (
+            "cuotas mínimas"
+            in evaluation.matched_categories["positive_odds_constraints"]
+        )
+        # The candidate window slices the original unaccented source text.
+        assert "deposito minimo" in evaluation.candidate_window
+        assert "cuotas minimas" in evaluation.candidate_window
+
+
+class TestUnicodeWordCounting:
+    """Tests for Unicode-aware word tokenization."""
+
+    def test_accented_and_non_ascii_words_counted_atomically(
+        self, scanner: PromotionScanner
+    ) -> None:
+        evaluation = scanner.evaluate_text(
+            "El ñandú corrió por la cañada el sábado"
+        )
+        assert evaluation.word_count == 8
+
+    def test_accented_words_are_not_split(
+        self, scanner: PromotionScanner
+    ) -> None:
+        assert scanner.evaluate_text("día ñoño").word_count == 2
+        assert scanner.evaluate_text("año").word_count == 1
+
+
+class TestSpanClustering:
+    """Tests for localized span clustering and candidate window selection."""
+
+    def test_distant_hits_produce_isolated_ordered_windows(
+        self, scanner: PromotionScanner
+    ) -> None:
+        gap = "filler " * 50  # 350 characters > default max_cluster_gap_chars
+        text = f"welcome bonus {gap}free bet{gap}boosted odds"
+        evaluation = scanner.evaluate_text(text)
+        assert len(evaluation.candidate_windows) == 3
+        assert "welcome bonus" in evaluation.candidate_windows[0]
+        assert "free bet" not in evaluation.candidate_windows[0]
+        assert "free bet" in evaluation.candidate_windows[1]
+        assert "welcome bonus" not in evaluation.candidate_windows[1]
+        assert "boosted odds" in evaluation.candidate_windows[2]
+        # Densest-cluster tie (1 occurrence each) resolves to the earliest.
+        assert evaluation.candidate_window == evaluation.candidate_windows[0]
+        assert "welcome bonus" in evaluation.candidate_window
+        assert "free bet" not in evaluation.candidate_window
+
+    def test_candidate_window_selects_densest_cluster(
+        self, scanner: PromotionScanner
+    ) -> None:
+        gap = "filler " * 50
+        text = (
+            f"welcome bonus{gap}"
+            "free bet deposit match and boosted odds"
+        )
+        evaluation = scanner.evaluate_text(text)
+        assert len(evaluation.candidate_windows) == 2
+        assert "welcome bonus" in evaluation.candidate_windows[0]
+        assert "free bet" in evaluation.candidate_windows[1]
+        assert "deposit match" in evaluation.candidate_windows[1]
+        # The three-term cluster outranks the single-term cluster despite
+        # appearing later in the document.
+        assert evaluation.candidate_window == evaluation.candidate_windows[1]
+        assert "welcome bonus" not in evaluation.candidate_window
+        assert evaluation.window_word_count > 0

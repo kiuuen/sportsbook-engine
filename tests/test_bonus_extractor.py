@@ -259,6 +259,21 @@ def make_source_text_safe(field_names) -> str:
 # Test data
 # ---------------------------------------------------------------------------
 
+QUOTE_LIBRARY = {
+    "rollover_multiplier": "wagering requirement of five times the bonus amount",
+    "min_selection_odds": "minimum selection odds of 1.5",
+    "max_selection_odds": "maximum selection odds of 100.0",
+    "min_accumulator_odds": "minimum accumulator odds of 1000.0",
+    "min_accumulator_legs": "minimum accumulator legs of 20",
+    "max_stake_contribution_pct": "maximum stake contribution of 50%",
+    "completion_deadline_days": "completion deadline of 30 days",
+    "min_qualifying_deposit": "minimum qualifying deposit of 100.0",
+    "max_qualifying_deposit": "maximum qualifying deposit of 1000.0",
+    "min_bonus_amount": "minimum bonus amount of 10.0",
+    "max_bonus_amount": "maximum bonus amount of 100.0",
+    "max_conversion_amount": "maximum conversion amount of 500.0",
+    "bonus_percentage": "bonus percentage of 100.0",
+}
 
 E2E_CITED_FIELDS = (
     "rollover_multiplier",
@@ -277,23 +292,6 @@ E2E_CITED_FIELDS = (
 )
 
 E2E_SOURCE_TEXT = make_source_text_safe(E2E_CITED_FIELDS)
-
-QUOTE_LIBRARY = {
-    "rollover_multiplier": "wagering requirement of five times the bonus amount",
-    "min_selection_odds": "minimum selection odds of 1.5",
-    "max_selection_odds": "maximum selection odds of 100.0",
-    "min_accumulator_odds": "minimum accumulator odds of 1000.0",
-    "min_accumulator_legs": "minimum accumulator legs of 20",
-    "max_stake_contribution_pct": "maximum stake contribution of 50%",
-    "completion_deadline_days": "completion deadline of 30 days",
-    "min_qualifying_deposit": "minimum qualifying deposit of 100.0",
-    "max_qualifying_deposit": "maximum qualifying deposit of 1000.0",
-    "min_bonus_amount": "minimum bonus amount of 10.0",
-    "max_bonus_amount": "maximum bonus amount of 100.0",
-    "max_conversion_amount": "maximum conversion amount of 500.0",
-    "bonus_percentage": "bonus percentage of 100.0",
-}
-
 
 # ---------------------------------------------------------------------------
 # Provider envelope builders

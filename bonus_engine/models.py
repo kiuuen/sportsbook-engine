@@ -56,7 +56,7 @@ class CalculationBase(str, Enum):
     DEPOSIT_PLUS_BONUS = "deposit_plus_bonus"
     FREEBET_STAKE = "freebet_stake"
     WINNINGS_ONLY = "winnings_only"
-    STAKE_PLUS_WINNINGS = "stake_plus_winwings"
+    STAKE_PLUS_WINNINGS = "stake_plus_winnings"
 
 
 class VerificationState(str, Enum):
@@ -99,14 +99,6 @@ _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
             VerificationState.MANUAL_REVIEW,
             VerificationState.PENDING_APPROVAL,
             VerificationState.SUPERSEDED,
-        }
-    ),
-    VerificationState.REJECTED: frozenset(
-        {
-            VerificationState.EXTRACTED,
-            VerificationState.INVARIANT_VALIDATED,
-            VerificationState.MANUAL_REVIEW,
-            VerificationState.PENDING_APPROVAL,
         }
     ),
     VerificationState.MANUAL_REVIEW: frozenset(
@@ -461,7 +453,7 @@ class WageringRequirement:
     """Mathematical parameters required to evaluate wagering feasibility."""
 
     rollover_multiplier: Optional[float] = None
-    calculation_base: CalculationBase = CalculationBase.UNSPECIFIED
+    calculation_base: CalculationBase = CalculationBase.BONUS_AMOUNT
     min_selection_odds: Optional[float] = None
     max_selection_odds: Optional[float] = None
     min_accumulator_odds: Optional[float] = None
@@ -474,12 +466,18 @@ class WageringRequirement:
 
     def __post_init__(self) -> None:
         rollover = _coerce_opt_float(self.rollover_multiplier)
-        if rollover is not None and rollover < 0:
+        if rollover is None:
+            raise ValueError(
+                "rollover_multiplier is required and must be a non-negative number"
+            )
+        if rollover < 0:
             raise ValueError("rollover_multiplier must be a non-negative number")
         self.rollover_multiplier = rollover
         self.calculation_base = (
-            _coerce_enum(self.calculation_base, CalculationBase)
-            or CalculationBase.UNSPECIFIED
+            _coerce_enum(
+                self.calculation_base, CalculationBase, CalculationBase.BONUS_AMOUNT
+            )
+            or CalculationBase.BONUS_AMOUNT
         )
         self.min_selection_odds = _coerce_opt_float(self.min_selection_odds)
         self.max_selection_odds = _coerce_opt_float(self.max_selection_odds)
@@ -548,12 +546,18 @@ class WageringRequirement:
         if not isinstance(data, dict):
             raise TypeError("WageringRequirement.from_dict expects a dictionary")
         rollover = _coerce_opt_float(data.get("rollover_multiplier"))
+        if rollover is None:
+            raise ValueError(
+                "WageringRequirement requires a numeric 'rollover_multiplier'"
+            )
         return cls(
             rollover_multiplier=rollover,
             calculation_base=_coerce_enum(
-                data.get("calculation_base"), CalculationBase
+                data.get("calculation_base"),
+                CalculationBase,
+                CalculationBase.BONUS_AMOUNT,
             )
-            or CalculationBase.UNSPECIFIED,
+            or CalculationBase.BONUS_AMOUNT,
             min_selection_odds=_coerce_opt_float(data.get("min_selection_odds")),
             max_selection_odds=_coerce_opt_float(data.get("max_selection_odds")),
             min_accumulator_odds=_coerce_opt_float(data.get("min_accumulator_odds")),

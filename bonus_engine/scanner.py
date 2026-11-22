@@ -91,11 +91,29 @@ class PromoLexiconLoader:
 
     @staticmethod
     def _compile_term(term: str) -> Tuple[str, re.Pattern[str]]:
-        """Compile one lexicon term into a diacritic-insensitive matcher."""
-        normalized_term = _normalize_text(term)
-        pattern = re.compile(
-            rf"(?<!\w){re.escape(normalized_term)}(?!\w)", re.IGNORECASE
-        )
+        """Compile one lexicon term into a diacritic-insensitive matcher.
+
+        Each letter is rendered as a character class accepting both its
+        original (possibly accented) casefolded codepoint and its unaccented
+        base. A single pattern therefore matches the raw lexicon term as well
+        as the scanner's diacritic-stripped, casefolded text projection.
+        Plain characters (and multi-codepoint casefold expansions) are
+        emitted as escaped literals and rely on ``re.IGNORECASE`` for case.
+        """
+        parts: List[str] = []
+        for char in term:
+            folded = char.casefold()
+            base = _normalize_text(char)
+            if (
+                char.isspace()
+                or len(folded) != 1
+                or len(base) != 1
+                or folded == base
+            ):
+                parts.append(re.escape(char))
+                continue
+            parts.append(f"[{re.escape(folded)}{re.escape(base)}]")
+        pattern = re.compile(rf"(?<!\w){''.join(parts)}(?!\w)", re.IGNORECASE)
         return term, pattern
 
     def load_lexicon(self) -> None:

@@ -517,6 +517,10 @@ class PromotionExtractor:
         promotion.notes = (
             f"{promotion.notes} | {flag}" if promotion.notes else flag
         )
+        try:
+            promotion.transition_to(VerificationState.MANUAL_REVIEW)
+        except ValueError as err:
+            logger.warning("Lifecycle transition failed: %s", err)
         logger.info(
             "Promotion flagged for review (%s): %s",
             codes,
@@ -594,14 +598,22 @@ class PromotionExtractor:
                 )
         promotions: List[Promotion] = []
         for evaluation in evaluations:
-            if not evaluation.is_viable or not evaluation.candidate_window:
+            if not evaluation.is_viable:
                 continue
-            promotions.extend(
-                self.extract_promotions(
-                    evaluation.candidate_window,
-                    target_domain=target_domain,
-                    source_url=source_url,
-                    raw_content=raw_content,
+            windows = [
+                window
+                for window in evaluation.candidate_windows
+                if isinstance(window, str) and window.strip()
+            ]
+            if not windows and isinstance(evaluation.candidate_window, str) and evaluation.candidate_window.strip():
+                windows = [evaluation.candidate_window]
+            for window in windows:
+                promotions.extend(
+                    self.extract_promotions(
+                        window,
+                        target_domain=target_domain,
+                        source_url=source_url,
+                        raw_content=raw_content,
+                    )
                 )
-            )
         return promotions

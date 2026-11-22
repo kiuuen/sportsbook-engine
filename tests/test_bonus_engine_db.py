@@ -29,6 +29,7 @@ from bonus_engine.models import (
     TemporalValidity,
     VerificationState,
     WageringRequirement,
+    find_transition_path,
 )
 
 TARGET_DOMAIN = "tests-bonus-target.example"
@@ -412,6 +413,28 @@ class TestLifecycleTransitions:
         with pytest.raises(ValueError):
             promotion.transition_to("bogus-state")  # type: ignore[arg-type]
 
+    def test_extracted_to_manual_review_then_confirmed(self) -> None:
+        promotion = _build_promotion()
+        promotion.transition_to(VerificationState.MANUAL_REVIEW)
+        assert promotion.verification_state == VerificationState.MANUAL_REVIEW
+        promotion.transition_to(VerificationState.OPERATOR_CONFIRMED)
+        assert promotion.verification_state == VerificationState.OPERATOR_CONFIRMED
+
+    def test_extracted_to_manual_review_then_rejected(self) -> None:
+        promotion = _build_promotion()
+        promotion.transition_to(VerificationState.MANUAL_REVIEW)
+        assert promotion.verification_state == VerificationState.MANUAL_REVIEW
+        promotion.transition_to(VerificationState.REJECTED)
+        assert promotion.verification_state == VerificationState.REJECTED
+
+    def test_find_transition_path_to_manual_review(self) -> None:
+        assert find_transition_path(
+            VerificationState.EXTRACTED, VerificationState.MANUAL_REVIEW
+        ) == (VerificationState.MANUAL_REVIEW,)
+        assert find_transition_path(
+            VerificationState.EXTRACTED, VerificationState.OPERATOR_CONFIRMED
+        ) != ()
+
 
 # ---------------------------------------------------------------------------
 # Database lifecycle and idempotency
@@ -693,6 +716,20 @@ class TestAtomicTransitions:
         with pytest.raises(ValueError):
             db_manager.transition_promotion("  ", VerificationState.REJECTED)
 
+    def test_extracted_to_manual_review_persisted(
+        self, db_manager: BonusDatabaseManager, promotion_factory: Callable[..., Promotion]
+    ) -> None:
+        promotion = promotion_factory()
+        assert promotion.verification_state == VerificationState.EXTRACTED
+        db_manager.save_promotion(TARGET_DOMAIN, promotion)
+        advanced = db_manager.transition_promotion(
+            promotion.promotion_id, VerificationState.MANUAL_REVIEW
+        )
+        assert advanced.verification_state == VerificationState.MANUAL_REVIEW
+        reloaded = db_manager.get_promotion(promotion.promotion_id)
+        assert reloaded is not None
+        assert reloaded.verification_state == VerificationState.MANUAL_REVIEW
+
 
 class TestOperatorAdjustments:
     def test_adjustment_routes_through_validation_to_confirmed(
@@ -877,6 +914,23 @@ class TestTargetAcquisitionState:
         self, db_manager: BonusDatabaseManager
     ) -> None:
         assert db_manager.get_target_acquisition_state("never-seen.example") is None
+
+    def test_needs_bonus_url_enum_value(self) -> None:
+        assert TargetAcquisitionState.NEEDS_BONUS_URL.value == "NEEDS_BONUS_URL"
+
+    def test_target_acquisition_state_roundtrip(
+        self, db_manager: BonusDatabaseManager
+    ) -> None:
+        db_manager.set_target_acquisition_state(
+            TARGET_DOMAIN, TargetAcquisitionState.NEEDS_BONUS_URL
+        )
+        assert (
+            db_manager.get_target_acquisition_state(TARGET_DOMAIN)
+            is TargetAcquisitionState.NEEDS_BONUS_URL
+        )
+        assert TARGET_DOMAIN in db_manager.get_targets_by_acquisition_state(
+            TargetAcquisitionState.NEEDS_BONUS_URL
+        )
 
     def test_query_by_state_returns_matching_domains(
         self, db_manager: BonusDatabaseManager
@@ -1135,3 +1189,87 @@ class TestConcurrentAccess:
         reloaded = db_manager.get_promotion(promotion.promotion_id)
         assert reloaded is not None
         assert reloaded.verification_state == VerificationState.INVARIANT_VALIDATED
+
+
+class TestOperatorProtectedStates:
+    @pytest.mark.parametrize(
+        "protected_state",
+        [VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED],
+    )
+    def test_protected_state_preserved_when_source_unchanged(
+        self,
+        db_manager: BonusDatabaseManager,
+        promotion_factory: Callable[..., Promotion],
+        protected_state: VerificationState,
+    ) -> None:
+        source_id, _ = db_manager.record_source(
+            TARGET_DOMAIN,
+            "https://tests-bonus-target.example/promos",
+            "Welcome bonus terms v1",
+        )
+        promotion = promotion_factory()
+        db_manager.save_promotion(TARGET_DOMAIN, promotion, source_id=source_id)
+        db_manager.transition_promotion(
+            promotion.promotion_id, VerificationState.INVARIANT_VALIDATED
+        )
+        db_manager.transition_promotion(promotion.promotion_id, protected_state)
+
+        fresh_extract = promotion_factory(
+            promotion_id=promotion.promotion_id,
+            title="Re-extracted Title",
+            verification_state=VerificationState.EXTRACTED,
+        )
+        returned_id = db_manager.save_promotion(
+            TARGET_DOMAIN, fresh_extract, source_id=source_id
+        )
+        assert returned_id == promotion.promotion_id
+        persisted = db_manager.get_promotion(promotion.promotion_id)
+        assert persisted is not None
+        assert persisted.verification_state == protected_state
+        assert persisted.title == promotion.title
+
+    @pytest.mark.parametrize(
+        "protected_state",
+        [VerificationState.OPERATOR_CONFIRMED, VerificationState.REJECTED],
+    )
+    def test_protected_state_forks_revision_when_source_changes(
+        self,
+        db_manager: BonusDatabaseManager,
+        promotion_factory: Callable[..., Promotion],
+        protected_state: VerificationState,
+    ) -> None:
+        source_v1, _ = db_manager.record_source(
+            TARGET_DOMAIN,
+            "https://tests-bonus-target.example/promos",
+            "Welcome bonus terms v1",
+        )
+        source_v2, changed = db_manager.record_source(
+            TARGET_DOMAIN,
+            "https://tests-bonus-target.example/promos",
+            "Welcome bonus terms v2 updated",
+        )
+        assert changed is True
+
+        promotion = promotion_factory()
+        db_manager.save_promotion(TARGET_DOMAIN, promotion, source_id=source_v1)
+        db_manager.transition_promotion(
+            promotion.promotion_id, VerificationState.INVARIANT_VALIDATED
+        )
+        db_manager.transition_promotion(promotion.promotion_id, protected_state)
+
+        updated_extract = promotion_factory(
+            promotion_id=promotion.promotion_id,
+            title="Updated Terms Title",
+            verification_state=VerificationState.INVARIANT_VALIDATED,
+        )
+        revision_id = db_manager.save_promotion(
+            TARGET_DOMAIN, updated_extract, source_id=source_v2
+        )
+        assert revision_id != promotion.promotion_id
+
+        original = db_manager.get_promotion(promotion.promotion_id)
+        revision = db_manager.get_promotion(revision_id)
+        assert original is not None and original.verification_state == protected_state
+        assert revision is not None
+        assert revision.verification_state == VerificationState.EXTRACTED
+        assert revision.title == "Updated Terms Title"

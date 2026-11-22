@@ -145,3 +145,13 @@ CONVENTIONS.md
 
 bifrost_logs.py
 
+# ============================================
+
+# Captured Test Fixtures (real payloads; must be tracked)
+
+# ============================================
+
+!tests/fixtures/
+
+!tests/fixtures/**
+

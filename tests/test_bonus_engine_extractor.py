@@ -1026,7 +1026,7 @@ class TestPromotionExtractorEndToEnd:
         )
         assert len(promotions) == 1
         promotion = promotions[0]
-        assert promotion.verification_state is VerificationState.EXTRACTED
+        assert promotion.verification_state is VerificationState.MANUAL_REVIEW
         assert "flagged_for_review" in (promotion.notes or "")
         assert "casino_style_rollover" in (promotion.notes or "")
 
@@ -1052,7 +1052,7 @@ class TestPromotionExtractorEndToEnd:
         )
         assert len(promotions) == 1
         promotion = promotions[0]
-        assert promotion.verification_state is VerificationState.EXTRACTED
+        assert promotion.verification_state is VerificationState.MANUAL_REVIEW
         assert "evidence_quote_unverified" in (promotion.notes or "")
 
     def test_malformed_campaign_payload_is_skipped(
@@ -1351,6 +1351,75 @@ class TestExtractFromEvaluations:
         )
         assert transport.calls[1]["payload"]["messages"][1]["content"] == (
             "second window text"
+        )
+
+    def test_multiple_candidate_windows_are_extracted_in_order(
+        self, config: ExtractionConfig
+    ):
+        first = build_campaign(title="First Offer")
+        second = build_campaign(title="Second Offer")
+        transport = ScriptedTransport(
+            [
+                (200, openai_envelope(json.dumps(first))),
+                (200, openai_envelope(json.dumps(second))),
+            ]
+        )
+        extractor = PromotionExtractor(config, transport=transport)
+        evaluation = ScanEvaluation(
+            relevance_score=0.9,
+            matched_categories={"positive_welcome": ["welcome bonus"]},
+            matched_noise_terms=[],
+            disqualifiers=[],
+            is_viable=True,
+            candidate_window="first window text",
+            candidate_windows=["first window text", "second window text"],
+            window_word_count=len("first window text".split()),
+            word_count=100,
+            source_text_length=100,
+        )
+        promotions = extractor.extract_from_evaluations(
+            [evaluation],
+            target_domain="example.com",
+            source_url="https://example.com/promo",
+        )
+        assert [p.title for p in promotions] == ["First Offer", "Second Offer"]
+        assert len(transport.calls) == 2
+        assert transport.calls[0]["payload"]["messages"][1]["content"] == (
+            "first window text"
+        )
+        assert transport.calls[1]["payload"]["messages"][1]["content"] == (
+            "second window text"
+        )
+
+    def test_empty_candidate_windows_falls_back_to_candidate_window(
+        self, config: ExtractionConfig
+    ):
+        campaign = build_campaign(title="Fallback Offer")
+        transport = ScriptedTransport(
+            [(200, openai_envelope(json.dumps(campaign)))]
+        )
+        extractor = PromotionExtractor(config, transport=transport)
+        evaluation = ScanEvaluation(
+            relevance_score=0.9,
+            matched_categories={"positive_welcome": ["welcome bonus"]},
+            matched_noise_terms=[],
+            disqualifiers=[],
+            is_viable=True,
+            candidate_window="fallback window text",
+            candidate_windows=[],
+            window_word_count=len("fallback window text".split()),
+            word_count=100,
+            source_text_length=100,
+        )
+        promotions = extractor.extract_from_evaluations(
+            [evaluation],
+            target_domain="example.com",
+            source_url="https://example.com/promo",
+        )
+        assert [p.title for p in promotions] == ["Fallback Offer"]
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["payload"]["messages"][1]["content"] == (
+            "fallback window text"
         )
 
     def test_non_sequence_input_raises_type_error(

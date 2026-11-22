@@ -734,7 +734,7 @@ class TestSpanClustering:
         self, scanner: PromotionScanner
     ) -> None:
         gap = "filler " * 50  # 350 characters > default max_cluster_gap_chars
-        text = f"welcome bonus {gap}free bet{gap}boosted odds"
+        text = f"welcome bonus {gap}free bet {gap}boosted odds"
         evaluation = scanner.evaluate_text(text)
         assert len(evaluation.candidate_windows) == 3
         assert "welcome bonus" in evaluation.candidate_windows[0]
@@ -752,7 +752,7 @@ class TestSpanClustering:
     ) -> None:
         gap = "filler " * 50
         text = (
-            f"welcome bonus{gap}"
+            f"welcome bonus {gap}"
             "free bet deposit match and boosted odds"
         )
         evaluation = scanner.evaluate_text(text)

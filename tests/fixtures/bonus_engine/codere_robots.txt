@@ -1,0 +1,184 @@
+# ---- LightSite.ai AI Discovery Rules (October 2025) ----
+
+# OpenAI Crawlers (2025)
+User-agent: GPTBot
+User-agent: ChatGPT-User
+User-agent: OAI-SearchBot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Google AI Crawlers (2025)
+User-agent: Google-Extended
+User-agent: Gemini-Pro
+User-agent: GoogleBot-AI
+#User-agent: Googlebot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Anthropic Claude (2025)
+User-agent: ClaudeBot
+User-agent: Claude-Web
+User-agent: anthropic-ai
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Perplexity AI (2025)
+User-agent: PerplexityBot
+User-agent: Perplexity-AI
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Meta AI (2025)
+User-agent: Meta-ExternalAgent
+User-agent: Meta-AI
+User-agent: FacebookBot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Microsoft Copilot (2025)
+User-agent: BingBot
+User-agent: Bing-AI
+User-agent: CopilotBot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Other AI Platforms (2025)
+User-agent: YouBot
+User-agent: DuckAssistBot
+User-agent: BraveBot
+User-agent: KogiBot
+User-agent: ArcBot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+# Common Crawlers
+User-agent: CCBot
+Allow: /
+Allow: /.well-known/ai-plugin.json
+Allow: /.well-known/openapi.json
+Allow: /.well-known/skills.json
+Allow: /ai-sitemap.xml
+
+User-agent: AdsBot-Google
+Allow: /
+
+User-agent: AdsBot-Google-Mobile
+Allow: /
+
+User-Agent: *
+Allow: /promociones/passaporte-codere
+Disallow: */landing-pages/*
+Disallow: */liveTextLandingPages/*
+Disallow: */landingpages/*
+Disallow: /es/online-game
+Disallow: */online-game/*
+Disallow: */igaming/games-info/*
+Disallow: */promociones/*
+Disallow: /promocionesss
+Disallow: */promotions/*
+#Disallow: */Promotions/*
+Disallow: /ayuda/contrasena-olvidada
+Disallow: /casinoCazadoresDelJuegoWidgetPage
+Disallow: /codere_codere-theme/js/app-out/img/js__components__common__BackToTop__img__Arrow-Green2.svg
+Disallow: /deposito-new
+Disallow: /undefined
+Disallow: /yak/promociones
+Disallow: /es_MX/
+Disallow: /es_MX
+Disallow: /usuario-olvidado
+#Disallow: /library/00Promo2022/*
+Disallow: /registro$
+Disallow: /historial-de-bonos$
+Disallow: /historial-new$
+Disallow: /mi-cuenta/verificación-documental
+Disallow: /mi-cuenta/recuperación-de-contraseña
+Disallow: /información-legal/reglas-políticas
+Disallow: /depósitos/depósito-en-book-autorizado
+Disallow: /deposito/$
+Disallow: /deposito$
+Disallow: /in-on$
+Disallow: *customTranslations.json
+Disallow: /casino/cazadores-del-juego/tc
+Disallow: /webContent/es_MX_*
+Disallow: /ayuda/beneficiario
+Disallow: /sitemap.xml
+Disallow: /sitemap_base.xml
+# TRACKING & AFFILIATE
+Disallow: /*?utm_
+Disallow: /*&utm_
+Disallow: /*?pid=
+Disallow: /*&pid=
+Disallow: /*?aid=
+Disallow: /*&aid=
+Disallow: /*?ref=
+Disallow: /*&ref=
+Disallow: /*?trk=
+Disallow: /*&trk=
+Disallow: /*?key=
+Disallow: /*&key=
+Disallow: /*?shortlink=
+Disallow: /*&shortlink=
+Disallow: /*?utm_cmp_rs=
+Disallow: /*&utm_cmp_rs=
+
+# PROMO/AUTH STATE CONTROLS (non-content-altering)
+Disallow: /*?authenticated=
+Disallow: /*&authenticated=
+Disallow: /*?promoData=
+Disallow: /*&promoData=
+Disallow: /*?vipstats=
+Disallow: /*&vipstats=
+
+# UI/CLIENT FLAGS
+Disallow: /*?clientType=
+Disallow: /*&clientType=
+Disallow: /*?clientPlatform=
+Disallow: /*&clientPlatform=
+Disallow: /*?ctype=
+Disallow: /*&ctype=
+Disallow: /*?ptype=
+Disallow: /*&ptype=
+Disallow: /*?lang=
+Disallow: /*&lang=
+Disallow: /*?login_action=
+Disallow: /*&login_action=
+Disallow: /*?back_url=
+Disallow: /*&back_url=
+Disallow: /*?amp=
+Disallow: /*&amp=
+
+# MISCELLANEOUS TECH/TEST
+Disallow: /*?ts=
+Disallow: /*&ts=
+Disallow: /*?test=
+Disallow: /*&test=
+Disallow: /*?hideHeader=
+Disallow: /*&hideHeader=
+Disallow: /*?hideFooter=
+Disallow: /*&hideFooter=
+Disallow: /*?source_caller=
+Disallow: /*&source_caller=
+
+Sitemap: https://www.codere.mx/library/sitemap.xml
+Sitemap: https://www.codere.mx/ai-sitemap.xml

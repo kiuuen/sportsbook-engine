@@ -40,6 +40,7 @@ class BonusDatabaseManager:
     _OPERATOR_PROTECTED_STATES = frozenset(
         {
             VerificationState.OPERATOR_CONFIRMED,
+            VerificationState.REJECTED,
             VerificationState.PENDING_APPROVAL,
             VerificationState.APPROVED,
         }

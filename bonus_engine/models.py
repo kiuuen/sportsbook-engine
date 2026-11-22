@@ -79,11 +79,16 @@ class TargetAcquisitionState(str, Enum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     ARCHIVED = "archived"
+    NEEDS_BONUS_URL = "NEEDS_BONUS_URL"
 
 
 _ALLOWED_TRANSITIONS: Dict[VerificationState, frozenset] = {
     VerificationState.EXTRACTED: frozenset(
-        {VerificationState.INVARIANT_VALIDATED, VerificationState.REJECTED}
+        {
+            VerificationState.INVARIANT_VALIDATED,
+            VerificationState.MANUAL_REVIEW,
+            VerificationState.REJECTED,
+        }
     ),
     VerificationState.INVARIANT_VALIDATED: frozenset(
         {

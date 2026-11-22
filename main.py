@@ -7,6 +7,9 @@ Routes CLI subcommands to the operational tools of the repository:
 - ``check``: replay health-check CLI (replay_executor).
 - ``norm``: normalization diagnostic harness (test_norm).
 - ``targets``: list targets registered in the control-plane database.
+- ``bonus-target-add`` / ``bonus-poll`` / ``bonus-audit`` / ``bonus-review``:
+  bonus-engine target registration, acquisition polling, state audit, and
+  interactive operator review.
 
 Executed without arguments, an interactive menu offers the same actions.
 
@@ -58,6 +61,9 @@ _MENU_CHOICES: Dict[str, str] = {
     "3": "check",
     "4": "norm",
     "5": "targets",
+    "6": "bonus-poll",
+    "7": "bonus-audit",
+    "8": "bonus-review",
 }
 
 
@@ -429,6 +435,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_DB_PATH,
         help=f"Control-plane SQLite database path (default: {_DEFAULT_DB_PATH}).",
     )
+
+    # Function-local import keeps bonus_engine (and its dependencies) out of
+    # the dispatcher's import-time path; it loads only when a parser is built.
+    from bonus_engine.cli import register_bonus_subcommands
+
+    register_bonus_subcommands(subparsers)
     return parser
 
 
@@ -442,6 +454,9 @@ def _interactive_menu() -> Optional[str]:
     print("    [3] check    - Replay health checks")
     print("    [4] norm     - Normalization diagnostic test")
     print("    [5] targets  - List registered targets")
+    print("    [6] bonus-poll  - Run the bonus acquisition pipeline")
+    print("    [7] bonus-audit - Audit bonus targets and promotions")
+    print("    [8] bonus-review - Review flagged bonus promotions")
     try:
         choice = input("\nSelect an action: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -476,6 +491,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args = parser.parse_args([command])
 
     handler = _COMMAND_HANDLERS.get(args.command)
+    if handler is None:
+        # Lazily resolved bonus-engine commands keep bonus_engine out of the
+        # dispatcher's import-time path until one of them is actually invoked.
+        from bonus_engine.cli import BONUS_COMMAND_HANDLERS
+
+        handler = BONUS_COMMAND_HANDLERS.get(args.command)
     if handler is None:
         parser.print_help()
         return 1

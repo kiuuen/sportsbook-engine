@@ -1,69 +1,147 @@
-"""
+
 # ============================================
+
 # Environment & Secrets
+
 # ============================================
+
 .env
+
 .env.*
+
 *.env
+
 .xml
+
 *.xml
+
+
+
 # ============================================
+
 # Databases & SQLite WAL/SHM (Bifrost & Engine)
+
 # ============================================
+
 *.db
+
 *.db-shm
+
 *.db-wal
+
 *.sqlite
+
 *.sqlite3
 
+*.bak
+
+
+
 # ============================================
-# Aider & LLM Artifacts
+
+# Aider, OpenCode & CodeGraph Artifacts
+
 # ============================================
+
 .aider*
+
 .aider.chat.history.md
+
 .aider.input.history
+
 .aider.tags.cache.v*
+
 repomix-output.xml
 
+.codegraph/
+
+.opencode/
+
+opencode.json
+
+opencode.jsonc
+
+
+
 # ============================================
+
 # Python Caches & Virtualenvs
+
 # ============================================
+
 __pycache__/
+
 *.py[cod]
+
 *$py.class
+
 .venv/
+
 venv/
+
 env/
 
+
+
 # ============================================
+
 # C++ Binaries & Visual Studio Artifacts
+
 # ============================================
+
 exercises/
+
 include/
+
 *.exe
+
 *.obj
+
 *.o
+
 *.pdb
+
 *.ilk
 
+
+
 # ============================================
+
 # Generated Schemas (Outputs)
+
 # ============================================
+
 data/schemas/*.json
 
+
+
 # ============================================
-# Markdown Chat Logs / Temporary
+
+# Markdown Chat Logs / Local Scripts / Configs
+
 # ============================================
+
 *.chat.history.md
+
 *.prompt.md
+
 *.json
-*.json
+
 !sportsbook_lexicon.json
+
 !network_filters.json
+
 !bonus_engine/*.json
+
 main_url.md
+
 *.bat
 
+start_bifrost.sh
+
+
+
 CONVENTIONS.md
+
 bifrost_logs.py
-"""
+
